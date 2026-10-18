@@ -1,3 +1,4 @@
+import { arSessionCommands } from './ar_session_commands'
 import type { TranslationOverrides } from './define-locale'
 
 export const arBoot = {
@@ -72,6 +73,15 @@ export const arBoot = {
       privacy: 'سياسة الخصوصية',
       after: ' الخاصة بنا.'
     }
+  },
+  promptNotices: {
+    legacySendUnconfirmed:
+      'تعذّر على هذا الخادم تأكيد الإرسال السابق لهذه الرسالة، لذا ربما تم تنفيذها بالفعل. راجع المحادثة قبل إرسالها مرة أخرى.',
+    mcpReloadDeferred:
+      'هذه المحادثة مشغولة: يُطبَّق تغيير MCP بعد انتهاء دورها وإعادة تحميل MCP مجددًا، أو عند إعادة فتح المحادثة',
+    mcpReloadNotInChat: server => `${server} غير مفعّل في هذه المحادثة`,
+    mcpReloadUnavailable: servers => `تعذّر الاتصال: ${servers}`,
+    sessionCommands: arSessionCommands
   },
   updates: {
     discontinuedTitle: 'لم يعد إصدار Hermes هذا مدعومًا',
@@ -339,5 +349,5 @@ export const arBoot = {
   }
 } satisfies Pick<
   TranslationOverrides,
-  'boot' | 'remoteDisplayBanner' | 'butterbar' | 'keepAwakeOffer' | 'updates' | 'install' | 'onboarding'
+  'boot' | 'remoteDisplayBanner' | 'butterbar' | 'promptNotices' | 'keepAwakeOffer' | 'updates' | 'install' | 'onboarding'
 >
