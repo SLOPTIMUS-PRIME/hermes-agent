@@ -463,6 +463,9 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         queue_generation = int(session.get("_queued_prompt_generation", 0))
         _ac_set_queue(session, session.get("queued_prompts") or [])
         session["running"] = True
+        # This accepted user prompt supersedes the old Stop, like an idle submit.
+        # Clear under the claim lock so a later Stop can set the latch again.
+        session["_turn_cancel_requested"] = False
         queued_transport = queued.get("transport")
         # The queuer's transport is pinned so the drained turn reaches the client that sent it — but
         # ATTACHED, not rebound: a mid-turn prompt from a second client used to silence the first for the
@@ -473,11 +476,12 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     use_compute_host = _session_uses_compute_host(session)
     with session["history_lock"]:
         if int(session.get("_queued_prompt_generation", 0)) != queue_generation:
-            # Generation bump cancelled the claim (Stop, compress re-anchor, …): don't dispatch, but restore the
-            # envelope (claimed head first, then whatever advanced into the slot) so a legitimate follow-up isn't dropped.
-            # See #84417.
-            advanced = session.get("queued_prompt")
-            _ac_set_queue(session, [queued, *([advanced] if advanced else []), *(session.get("queued_prompts") or [])])
+            # Re-anchor may invalidate a claim without cancelling its prompt (#84417).
+            # A newer Stop DID cancel it: restoring it would let the next drain clear
+            # that Stop and revive cancelled work. Preserve only post-Stop arrivals.
+            if not session.get("_turn_cancel_requested"):
+                advanced = session.get("queued_prompt")
+                _ac_set_queue(session, [queued, *([advanced] if advanced else []), *(session.get("queued_prompts") or [])])
             session["running"] = False
             return True
     kwargs: dict = {"queued_prompt_generation": queue_generation}
