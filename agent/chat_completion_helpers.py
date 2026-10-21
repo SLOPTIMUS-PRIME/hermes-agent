@@ -731,15 +731,14 @@ def _bedrock_reasoning_stale_floor(model_id: object) -> float | None:
 
 
 def _bedrock_converse_call(api_kwargs: dict, *, stream: bool, on_stream_denied=None):
-    """Pop the Hermes routing keys and call ``converse`` / ``converse_stream`` (boto3
-    directly) with the shared recovery: a cachePoint rejection (Nova: toolConfig.tools,
-    #97281) drops the marker and resends once inside the same attempt; a streaming IAM
-    denial hands off to ``on_stream_denied(client, kwargs, exc)``; a stale connection
-    evicts the cached client so the outer retry builds a fresh pool. Streaming returns the
-    event stream; non-streaming an OpenAI-shaped SimpleNamespace."""
+    """Pop the Hermes routing keys and call ``converse`` / ``converse_stream`` (boto3 directly) with the
+    adapter's shared recovery: a cachePoint rejection (Nova: toolConfig.tools, #97281) or a replayed sealed
+    reasoning rejection resends once without the offending blocks inside the same attempt; a streaming IAM
+    denial hands off to ``on_stream_denied(client, kwargs, exc)``; a stale connection evicts the cached
+    client so the outer retry builds a fresh pool. Streaming returns the event stream; else a SimpleNamespace."""
     from agent.bedrock_adapter import (_get_bedrock_runtime_client, invalidate_runtime_client,
         is_stale_connection_error, is_streaming_access_denied_error, normalize_converse_response,
-        recover_from_cache_point_rejection)
+        recover_from_cache_point_rejection, recover_from_redacted_reasoning_rejection)
     region = api_kwargs.pop("__bedrock_region__", "us-east-1")
     api_kwargs.pop("__bedrock_converse__", None)
     client = _get_bedrock_runtime_client(region)
@@ -748,7 +747,8 @@ def _bedrock_converse_call(api_kwargs: dict, *, stream: bool, on_stream_denied=N
     try:
         raw_response = method(**api_kwargs)
     except Exception as exc:
-        retry_kwargs = recover_from_cache_point_rejection(exc, api_kwargs)
+        retry_kwargs = (recover_from_cache_point_rejection(exc, api_kwargs)
+                        or recover_from_redacted_reasoning_rejection(exc, api_kwargs))
         if retry_kwargs is not None:
             return finish(method(**retry_kwargs))
         if on_stream_denied is not None and is_streaming_access_denied_error(exc):
@@ -2170,8 +2170,8 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
     # Compression/resume can orphan a tool result whose parent tool_call was summarized away.
     api_messages = agent._sanitize_api_messages(api_messages)
     # Same send-path vision eviction as the main loop (#89296).
-    from agent.context_compressor import evict_stale_outbound_tool_images
-    evict_stale_outbound_tool_images(api_messages)
+    from agent.context_compressor import evict_stale_outbound_tool_images, outbound_retired_image_ids
+    evict_stale_outbound_tool_images(api_messages, outbound_retired_image_ids(agent))
     # Same per-model image strip as turn_api_request.build_api_request: this path builds
     # api_messages by hand and calls _build_api_kwargs directly, so a model recorded in
     # agent._image_rejecting_models would otherwise get images here → 4xx → no summary.
