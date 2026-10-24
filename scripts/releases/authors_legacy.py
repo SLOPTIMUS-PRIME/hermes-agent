@@ -533,7 +533,7 @@ LEGACY_AUTHOR_MAP = {
     "sanghyuk_seo@nexcubecorp.com": "sanghyuk-seo-nexcube",
     "subrtt@gmail.com": "Brixyy",
     "wangpuv@hotmail.com": "wangpuv",
-    "202622897+ticketclosed-wontfix@users.noreply.github.com": "ticketclosed-wontfix",
+    "202622897+ticketclosed-wontfix@users.noreply.github.com": "SLOPTIMUS-PRIME",
     "wuxuebin1993@gmail.com": "victorGPT",
     "xiaoxingitee@gmail.com": "xiaoxinova",
     "wei.chen.coder@gmail.com": "wenchengxucool",
