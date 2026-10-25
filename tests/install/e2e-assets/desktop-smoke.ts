@@ -346,9 +346,10 @@ export async function runInstalledDesktopSmoke(options: SmokeOptions, launchApp:
     // `identity.hermesRoot` was asserted against options.root above. For a listener that
     // descends from this app process, on a platform that cannot read the backend's own
     // environment, those two facts are the available evidence; a ledger-attached host
-    // backend is not tied to the app by ancestry and must prove its tree itself.
-    assertBackendOrigin(backend, options.root, options.origin, { appReportedRoot: identity.hermesRoot })
+    // backend is not tied to the app by ancestry and must prove its tree itself; a canonical
+    // gateway whose cwd is unreadable must report the installed commit.
     const provenanceCommit = readInstallationCommit(options.root, options.origin)
+    assertBackendOrigin(backend, options.root, options.origin, { appReportedRoot: identity.hermesRoot, installedCommit: provenanceCommit })
     if (provenanceCommit !== options['expect-commit']) { throw new Error('Installed commit differs from --expect-commit') }
     // Trace only chat actions. Connection probes can return credential-bearing logs.
     await app.context().tracing.start({ screenshots: true, snapshots: false, sources: false })
@@ -383,6 +384,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     'user-data': { type: 'string' }, out: { type: 'string' }, phase: { type: 'string' },
     'expect-commit': { type: 'string' }, 'launch-spec': { type: 'string' }, 'mock-url': { type: 'string' },
   } })
+
+  // When the app exits before printing its debugger line, Playwright's Electron.launch rejects
+  // the awaited watcher and leaves its sibling stderr watchers' rejections unhandled. Without a
+  // listener Node dies on those first, so the catch below never writes the failed receipt or the
+  // launch call log (the app's exit code and stderr). Still fail the run.
+  process.on('unhandledRejection', (reason: unknown): void => {
+    console.error(`unhandled rejection: ${redact(String(reason))}`)
+    process.exitCode = 1
+  })
+
   try {
     await runInstalledDesktopSmoke(optionsSchema.parse(values))
   } catch (error) {

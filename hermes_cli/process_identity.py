@@ -17,9 +17,11 @@ import platform
 import sys
 import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Iterator, Optional, Sequence
 
 from utils import atomic_json_write
 
@@ -82,6 +84,21 @@ def process_birth(proc) -> float:
             except TypeError:  # a psutil without the monotonic read: fall back to the adjusted one
                 pass
     return float(proc.create_time())
+
+
+def worker_birth(proc) -> float:
+    """The birth a managed worker's identity fences compare: its hello, its scope and the Kanban
+    owner receipt. :func:`process_birth`, except on Linux, where psutil's ``create_time()`` adds the
+    ``/proc/stat`` btime it re-reads on every call. WSL2 re-anchors btime after host sleep, so the
+    owner read a live worker's birth shifted from the one it reported and refused it (KB-12). The
+    kernel's start ticks since boot (``monotonic=True``) never move. The spawn ledger keeps
+    :func:`process_birth`: its persisted epoch births must keep matching across an update.
+    Raises ``psutil.Error`` like ``create_time()``.
+    """
+    import psutil
+    if getattr(psutil, "LINUX", False):
+        return float(proc._proc.create_time(monotonic=True))
+    return process_birth(proc)
 
 
 def _process_create_time(pid: Optional[int] = None) -> Optional[float]:
@@ -282,10 +299,33 @@ def is_desktop_owned_backend(argv: Optional[Sequence[str]] = None) -> bool:
     return is_desktop_ssh_backend_argv(list(sys.argv[1:] if argv is None else argv))
 
 
-def is_local_desktop_backend() -> bool:
-    """The backend Desktop spawned on this machine: the local pool spawn's credential, never the
-    SSH spawn (its token arrives as a file on argv, and that host is another computer)."""
-    return os.environ.get("HERMES_DESKTOP") == "1" and os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN", "") != ""
+# Set while this process works for the Desktop app on its own machine: one request from, or one turn of
+# a chat created by, a client ``local_desktop_client`` accepted. The gateway serves the Desktop, the CLI,
+# the TUI and bots from one process, so this is a property of the activity, never of the process.
+_SERVING_LOCAL_DESKTOP: ContextVar[bool] = ContextVar("hermes_serving_local_desktop", default=False)
+
+
+@contextmanager
+def serving_local_desktop(active: bool) -> Iterator[None]:
+    """Mark the enclosed activity (and threads it hands its context to) as work for the local Desktop."""
+    token = _SERVING_LOCAL_DESKTOP.set(bool(active) or _SERVING_LOCAL_DESKTOP.get())
+    try:
+        yield
+    finally:
+        _SERVING_LOCAL_DESKTOP.reset(token)
+
+
+def serves_local_desktop_now() -> bool:
+    return _SERVING_LOCAL_DESKTOP.get()
+
+
+def local_desktop_client(identity: Optional[dict], declared: object) -> bool:
+    """A connected client is the Desktop app on this machine when it says so (it knows its connection
+    mode) AND it redeemed a native ticket, which only this machine's private control socket mints, for
+    this OS user. Neither alone: the CLI and TUI hold native tickets too, and the claim is the client's
+    word. A remote Desktop reaches a backend through SSH, URL or Cloud credentials, never a native ticket."""
+    return (declared is True and isinstance(identity, dict) and identity.get("provider") == "local"
+            and identity.get("native_bootstrap") is True)
 
 
 def _desktop_spawner_identity() -> tuple[Optional[int], Optional[float]]:
