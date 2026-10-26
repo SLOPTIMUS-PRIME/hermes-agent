@@ -10,6 +10,7 @@ Contracts:
 
 import json
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -226,7 +227,9 @@ def test_a_failed_row_keeps_its_reason_and_try_again_works_while_the_card_is_ope
     card = _card(lambda payload: {"targets": [{"name": "blender", "status": "approved", "env": None}]})
 
     def wait_for(state):
-        for _ in range(200):
+        # A deadline, not an iteration count: 200 x 10 ms timed out under a loaded CI shard.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
             operation = live.current("s1")
             if operation is not None and operation.targets[0].state == state:
                 return operation
