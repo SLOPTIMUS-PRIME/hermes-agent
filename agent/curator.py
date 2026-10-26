@@ -301,7 +301,7 @@ CURATOR_REVIEW_PROMPT = (
     "Preserve exact identifiers, commands, owner decisions and supporting files. "
     "Move lengthy detail into references only when this improves actual use; "
     "do not rewrite correct content for style or erase useful provenance. "
-    "Keep descriptions discoverable in their first 57 characters.\n\n"
+    "Keep descriptions discoverable in their first 60 characters.\n\n"
     "Hard rules — do not violate:\n"
     "1. DO NOT touch bundled, hub-installed, or external-dir skills "
     "(`skills.external_dirs`). The candidate list below is already filtered "
