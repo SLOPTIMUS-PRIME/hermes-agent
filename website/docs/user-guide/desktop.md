@@ -706,6 +706,14 @@ SHA-pinned) plus an import allowlist — not isolation. A plugin whose
 row; **⌘K → Reload desktop plugins** re-reads every installed `plugin.js`,
 including one an installer replaced in place.
 
+The [Webapp](#use-the-desktop-workspace-from-a-browser) loads the desktop plugins installed on the
+host that serves it, from the `desktop-plugins` folder of that host's Hermes root, whichever profile
+the tab is on. A new or removed plugin folder shows up within seconds; an edited `plugin.js` loads on
+**⌘K → Reload desktop plugins**, since a browser cannot watch the host's files. The desktop half of
+an agent+desktop package appears once native Desktop on that host has copied it into the folder.
+Install and remove desktop plugins from native Desktop or in the folder itself; a plugin's folder
+access (`ctx.files`) is not available in a browser.
+
 **Capabilities → Plugins** is the one place for everything that extends
 Hermes: **one row per plugin**, with two switch columns.
 
@@ -824,6 +832,10 @@ launcher. PM selects its interpreter and dependency generation. A missing
 bootstrap marker does not force installation when that launcher works.
 
 On Linux, Chromium's own errors go to `HERMES_HOME/logs/desktop-chromium.log`, and a crash of the shell itself leaves a minidump under the app's `Crashpad/` directory (inside Electron's user-data directory, next to `connection.json`). If the window vanishes with `SIGTRAP` in the journal, the `FATAL:` line in that log names the check that fired; attach it to the bug report. Nothing is uploaded.
+
+On Ubuntu 23.10 and later, `kernel.apparmor_restrict_unprivileged_userns=1` blocks Chromium's user-namespace sandbox for any program without an AppArmor profile. `hermes desktop` checks this through the Hermes binary itself and then uses Chromium's setuid `chrome-sandbox` helper (root-owned, mode 4755), which asks for `sudo` again after each rebuild. That helper is the recommended route. If the helper cannot be set up either, Desktop starts with `--no-sandbox` and the launcher prints both commands, the helper first.
+
+`hermes desktop --install-apparmor-profile` is the opt-in alternative that survives rebuilds: it installs a profile under `/etc/apparmor.d/` (sudo required) that grants user namespaces to this app's path. Chrome and VS Code get the same grant, but for root-owned binaries. This app's path is usually in a checkout your account can write, so any program running as you could put its own binary there and get the user namespaces the restriction withholds. For your account, that is about the same as turning the restriction off. The command refuses install paths containing AppArmor pattern characters (`? * [ ] { } ^ " \` and non-printable characters; see apparmor.d(5) "Globbing"). It checks the profile with `apparmor_parser --skip-kernel-load` before writing anything, and removes the file again if loading it fails.
 
 If Python dependencies are damaged, run the installation's `hermes pm repair`.
 Then restart Desktop. Do not delete guessed `venv` paths or PM facts. For

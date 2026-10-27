@@ -295,7 +295,7 @@ export const isFreshDraftScope = (key: string | null | undefined): boolean =>
 // A null/empty scope IS the current fresh-chat lifecycle — resolve it to that
 // lifecycle's own key so every stash/read/migrate consumer below addresses the
 // active fresh bucket instead of the shared legacy one.
-const draftKey = (scope: string | null | undefined) => scope?.trim() || freshDraftScope()
+export const draftKey = (scope: string | null | undefined) => scope?.trim() || freshDraftScope()
 
 /** Inline "Restored your unsent message" notice for the fresh draft (see
  *  `adoptGoneSessionDraft`). `null` = nothing to show. */
@@ -548,6 +548,11 @@ export function takeSessionDraft(scope: string | null | undefined): SessionDraft
 
   return stashed ? cloneDraft(stashed) : EMPTY_SESSION_DRAFT
 }
+
+/** When `scope`'s saved draft was last written (ms; 0 for one carried over from the unstamped v3
+ *  list), or undefined when none is saved. */
+export const savedDraftAt = (scope: string | null | undefined): number | undefined =>
+  persistedDrafts.get(draftKey(scope))?.at
 
 export const clearSessionDraft = (scope: string | null | undefined) => stashSessionDraft(scope, '', [])
 
