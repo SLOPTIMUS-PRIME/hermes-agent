@@ -348,7 +348,8 @@ import { createNvidiaEglRecovery } from './linux-nvidia-egl-recovery'
 import { relaunchIfNoSandboxCameTooLate } from './linux-sandbox-relaunch'
 import { createLocalBackendLifecycle, waitForTeardown } from './local-backend-lifecycle'
 import { resolveIpcFileReadPath, resolveMediaStreamFile, resolvePreviewTargetPath } from './local-read-path'
-import { localSkinProfileKey, readLocalSkinPayload } from './local-skin'
+import { resolveDesktopClientVersion } from './local-runtime-version'
+import { localSkinProfileKey, registerLocalSkinIpc } from './local-skin'
 import { ACTIVE_LOG_POLL_MS, planLogRotation, reclaimActiveLogIfOversized } from './log-rotation'
 import { registerMachineProfile } from './machine-profile'
 import { createMainProcessLagWatchdog } from './main-process-lag-watchdog'
@@ -588,6 +589,7 @@ import {
   windowOpacityFor,
   windowOpacityOptions
 } from './translucency'
+import { registerMachineUiPreferences } from './ui-preferences-ipc'
 import {
   UPDATE_HANDOFF_DWELL_MS,
   UPDATE_WAIT_POLL_MS,
@@ -649,6 +651,7 @@ import {
 import { startUpdateRelaunchWaiter } from './updater/relaunch-waiter'
 import { preflightStateDb } from './updater/state-db-preflight'
 import { createStoreStrategy } from './updater/store-client'
+import { filenameFromUrl } from './url-filename'
 import { isExternalVenvHolder, isHermesOwnedVenvDaemon } from './venv-holder-select'
 import { fetchMarketplaceThemes, searchMarketplaceThemes } from './vscode-marketplace'
 import { createWakeIndicatorWindowController } from './wake-indicator-window'
@@ -3660,7 +3663,7 @@ function resolveCheckoutUpdateStrategy(): CheckoutStrategy {
         throw new Error(message)
       }
 
-      preflightStateDb({
+      await preflightStateDb({
         python: managed ? null : await findPythonForRoot(root),
         launcher,
         script: path.join(root, 'hermes_cli', 'backup_sqlite.py'),
@@ -5467,17 +5470,6 @@ function extensionForMimeType(mimeType) {
   }
 
   return ''
-}
-
-function filenameFromUrl(rawUrl, fallback = 'image') {
-  try {
-    const parsed = new URL(rawUrl)
-    const base = path.basename(decodeURIComponent(parsed.pathname || ''))
-
-    return base && base.includes('.') ? base : fallback
-  } catch {
-    return fallback
-  }
 }
 
 async function resourceBufferFromUrl(rawUrl) {
@@ -17083,18 +17075,10 @@ ipcMain.on('hermes:logs:renderer-error', (_event, report) => {
   flushDesktopLogBufferSync()
 })
 
-// The preload reads this small, sanitized payload synchronously so the renderer
-// can register the local skin before its first theme paint. It stays independent
-// of the selected gateway, which can be an offline remote primary.
-ipcMain.on('hermes:skin:local', event => {
-  // The window route is more specific than the global next-launch preference:
-  // a peer can be booting another profile while that preference changes.
-  event.returnValue = readLocalSkinPayload(
-    HERMES_HOME,
-    windowConnectionRoutes.get(event.sender.id)?.profile,
-    primaryProfileKey()
-  )
-})
+// Pre-paint payloads the preload reads synchronously: the local skin, and this
+// machine's shared UI preferences (#145213) — see local-skin.ts, ui-preferences.ts.
+registerLocalSkinIpc(ipcMain, HERMES_HOME, id => windowConnectionRoutes.get(id)?.profile, primaryProfileKey)
+registerMachineUiPreferences(HERMES_HOME)
 
 // Renderer error toasts (notifyError): the toast shows the summarized copy,
 // so the caller posts the full error here for desktop.log. Fire-and-forget,
@@ -17193,12 +17177,11 @@ async function detectRendererSkew() {
   return checkRendererSkew(resolveUpdateRoot())
 }
 
-// Re-resolve the live Hermes version and push it into the native About panel
-// just before showing it, so an in-place `hermes update` is reflected without
-// an app restart. macOS only — `showAboutPanel()` is a no-op elsewhere, and the
-// other platforms don't use this menu item.
+// Re-resolve the focused window's live Hermes version just before showing the native About
+// panel, so an in-place `hermes update` shows without a restart. macOS only (no-op elsewhere).
 function showAboutPanelFresh(): void {
-  void Promise.all([detectRendererSkew(), resolveHermesVersion()]).then(([skew, version]) => {
+  const scope = windowConnectionRoutes.versionScopeFor(BrowserWindow.getFocusedWindow() ?? mainWindow)
+  void Promise.all([detectRendererSkew(), resolveHermesVersion(scope)]).then(([skew, version]) => {
     const info: AppVersionInfo = appVersionInfo(INSTALL_STAMP, version, app.getVersion())
     // The product name already identifies canary and commit builds. Never pass
     // through empty/placeholder: the panel would render the bundle's 0.0.0 (#124581).
@@ -17213,10 +17196,17 @@ function showAboutPanelFresh(): void {
 }
 
 ipcMain.handle('hermes:version', async (_event, scope?: { connectionId?: string; profile?: string }) => {
-  const [skew, version] = await Promise.all([detectRendererSkew(), resolveHermesVersion(scope)])
+  const [skew, version, clientVersion] = await Promise.all([
+    detectRendererSkew(),
+    resolveHermesVersion(scope),
+    resolveDesktopClientVersion(INSTALL_STAMP, resolveUpdateRoot(), HERMES_HOME, app.getVersion())
+  ])
 
   return {
     ...appVersionInfo(INSTALL_STAMP, version, app.getVersion()),
+    // Both sides, labelled: the backend the active connection runs, and this machine's install.
+    backendVersion: version,
+    clientVersion,
     electronVersion: process.versions.electron,
     nodeVersion: process.versions.node,
     platform: process.platform,
