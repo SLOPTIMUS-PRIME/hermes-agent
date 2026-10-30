@@ -55,7 +55,7 @@ export const jaErrorCodes: Partial<ThreadCopy['errorCodes']> = {
   truncated: {
     title: '返信が途中で切れました',
     body: (_provider, model) =>
-      `${model || 'モデル'} が完了前に出力上限に達したため、何も実行されませんでした。「続行」で中断したところから再開できます。`
+      `${model || 'モデル'} の返答が完了前に止まりました。「続行」で中断したところから再開できます。`
   },
   loop_error: {
     title: 'Hermes はこのステップを完了できませんでした',

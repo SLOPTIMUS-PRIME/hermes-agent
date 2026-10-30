@@ -290,111 +290,13 @@ export function errorCardKey(surface: ErrorSurface | null | undefined): ErrorCar
     : { layer: surface.layer }
 }
 
-/** Which recovery buttons the error card offers for a failure. Every flag
- *  maps to an EXISTING handler in the app; the card only decides visibility. */
-export interface ErrorRecoveryPlan {
-  /** assistant-ui reload of the failed turn. */
-  retry: boolean
-  /** Open the model picker (model_not_found). */
-  chooseModel: boolean
-  /** Run /compress on this session (context too long). */
-  compress: boolean
-  /** requestFreshSession — when this session cannot continue as-is. */
-  startNewSession: boolean
-  /** Open the preceding user message in the edit composer (safety refusal). */
-  editMessage: boolean
-  /** Reveal the Hermes data folder so the user can free space (disk_full). */
-  openHermesFolder: boolean
-  /** Settings → Keys deep link (auth, api_key). */
-  updateApiKey: boolean
-  /** Re-run the provider's OAuth sign-in (auth, oauth). */
-  signInAgain: boolean
-  /** Open the free-tier sign-in dialog (free_tier_* codes): signing in is free and lifts the refusal. */
-  signInFreeTier: boolean
-  /** Open the live session model menu (switches THIS session via
-   *  model.switch); Settings → Models deep link fallback when no chat surface
-   *  is on screen. */
-  switchProvider: boolean
-  /** Settings → Billing (usage_window: turn on Keep going, add credits). */
-  openBilling: boolean
-  /** usage_window: one-click "Switch to <recommended model>" (this session),
-   *  then re-run the turn. Shown only when the backend named a model. */
-  switchToModel: boolean
-  /** usage_window: "Use credits" — turns on Keep going, then re-runs the turn. */
-  useCredits: boolean
-  /** Open logs / Send diagnostics / Copy details. Off for a plan limit: it is
-   *  not a fault, and those buttons would bury the two that fix it. */
-  diagnostics: boolean
-}
-
-// Layers where the fix is provider/endpoint/auth config, not a retry.
+// Layers where another provider can be the fix (the provider side failed, not the gateway or disk).
 const SWITCH_PROVIDER_LAYERS: readonly ErrorSurfaceLayer[] = ['auth', 'billing', 'endpoint', 'provider']
 
-// Per-code overrides on top of the layer defaults. `retry: false` here means
-// the classifier may call the failure retryable at the transport level, but
-// an unchanged retry is known to reproduce it for the user (too long a
-// conversation, a blocked prompt, a chat another surface owns).
-const CODE_PLANS: Partial<Record<ErrorCodeKey, Partial<ErrorRecoveryPlan>>> = {
-  SESSION_NOT_OWNED: { retry: false, startNewSession: true },
-  SESSION_OWNER_BUSY: { retry: true, startNewSession: false },
-  SESSION_OWNER_UNCONFIRMED: { retry: false, startNewSession: false },
-  cron_session_read_only: { retry: false, startNewSession: true },
-  session_read_only: { retry: false, startNewSession: true },
-  // Retry is the next click once the folder is back or the chat was moved (Move to project).
-  workspace_unavailable: { retry: true, startNewSession: true },
-  launch_credentials_unavailable: { retry: false, startNewSession: true },
-  content_policy_blocked: { editMessage: true, retry: false },
-  context_overflow: { compress: true, retry: false, startNewSession: true },
-  disk_full: { openHermesFolder: true, retry: true },
-  loop_error: { startNewSession: true },
-  model_not_found: { chooseModel: true, retry: false },
-  payload_too_large: { compress: true, retry: false, startNewSession: true },
-  // A window plan's limit: the two ways on, one click each — switch to the
-  // plan's recommended model, or spend credits (Use credits when Keep going is
-  // off and there is a balance, else Add credits via Billing). Retry at the
-  // reset stays. Switch provider is not the fix (the provider is fine).
-  usage_window: { diagnostics: false, openBilling: true, retry: true, switchProvider: false }
-}
-
-export function errorRecoveryPlan(surface: ErrorSurface | null | undefined): ErrorRecoveryPlan {
-  const oauthReauth = isOAuthReauthSurface(surface)
-  const apiKeyRejected = isApiKeyRejectedSurface(surface)
-
-  const base: ErrorRecoveryPlan = {
-    chooseModel: false,
-    compress: false,
-    editMessage: false,
-    openHermesFolder: false,
-    // Retry re-runs the failed prompt in place. Suppressed when the classifier
-    // says the failure is deterministic — except for a credential rejection,
-    // where fixing the credential changes the outcome and Retry is the
-    // natural second click.
-    retry: !surface || surface.retryable || oauthReauth || apiKeyRejected,
-    signInAgain: oauthReauth,
-    signInFreeTier: isFreeTierSurface(surface),
-    startNewSession: false,
-    switchProvider: surface != null && SWITCH_PROVIDER_LAYERS.includes(surface.layer),
-    openBilling: false,
-    switchToModel: false,
-    useCredits: false,
-    diagnostics: true,
-    updateApiKey: apiKeyRejected
-  }
-
-  const key = errorCardKey(surface)
-  const plan = { ...base, ...('code' in key ? CODE_PLANS[key.code] : undefined) }
-
-  if (surface?.code === 'usage_window') {
-    const limit = surface.usageLimit
-    plan.switchToModel = Boolean(limit?.suggestions.length)
-    plan.useCredits = limit?.credits === 'use_credits'
-    // Use credits replaces Open billing; Add credits is Open billing.
-    plan.openBilling = !plan.useCredits
-    // An older backend (no structured limit): keep the menu so there is still a way on.
-    plan.switchProvider = !limit
-  }
-
-  return plan
+/** Open logs / Send diagnostics / Copy details. Off for a plan limit: it is not a fault,
+ *  and those links would bury the actions that fix it. */
+export function errorCardShowsDiagnostics(surface: ErrorSurface | null | undefined): boolean {
+  return surface?.code !== 'usage_window'
 }
 
 /** Plain-text error-details blob for the error card's "Copy error details". */
@@ -479,7 +381,6 @@ export function providerSettingsUrl(surface?: ErrorSurface | null): string | und
 
 // One main action + at most one second option per code (Error System Overhaul).
 const CODE_ACTIONS: Partial<Record<ErrorCodeKey, ErrorCardActions>> = {
-  // Shown only when the out-of-credits banner is not already on screen for this chat.
   billing: { primary: 'open_billing', secondary: 'switch_provider' },
   content_policy_blocked: { primary: 'edit_message' },
   context_overflow: { primary: 'compress', secondary: 'start_new_session' },
@@ -508,18 +409,28 @@ const CODE_ACTIONS: Partial<Record<ErrorCodeKey, ErrorCardActions>> = {
 // A window plan's limit: switch to the plan's recommended model, else spend credits
 // (Use credits when Keep going is off with a balance, else Add credits via Billing).
 // An older backend sends no structured limit: Billing, or another model.
+// Once the reset has passed the allowance is back, so a plain Retry replaces the scheduled one.
 function usageWindowActions(surface: ErrorSurface): ErrorCardActions {
-  const plan = errorRecoveryPlan(surface)
-  const credits: ErrorActionId = plan.useCredits ? 'use_credits' : 'open_billing'
+  const limit = surface.usageLimit
+  const credits: ErrorActionId = limit?.credits === 'use_credits' ? 'use_credits' : 'open_billing'
 
-  if (plan.switchToModel) {
+  if (limit?.suggestions.length) {
     return { primary: 'switch_to_model', secondary: credits }
   }
 
-  if (!surface.usageLimit) {
+  if (!limit) {
     return { primary: credits, secondary: 'choose_model' }
   }
 
+  if (surface.resetsAt === undefined) {
+    return { primary: credits }
+  }
+
+  if (surface.resetsAt * 1000 <= Date.now()) {
+    return { primary: credits, secondary: 'retry' }
+  }
+
+  // Still ahead: Retry at the reset, unless it is too far off for a browser timer (a monthly window).
   return scheduledRetryDelayMs(surface.resetsAt) === null
     ? { primary: credits }
     : { primary: credits, secondary: 'retry_at_reset' }
@@ -562,8 +473,9 @@ export function errorCardActions(surface: ErrorSurface | null | undefined): Erro
     return byCode
   }
 
+  // Signing in is free and lifts the refusal; a transient one (rate limit) can also just be retried.
   if (isFreeTierSurface(surface)) {
-    return { primary: 'sign_in_free_tier' }
+    return surface.retryable ? { primary: 'sign_in_free_tier', secondary: 'retry' } : { primary: 'sign_in_free_tier' }
   }
 
   if (
@@ -578,7 +490,14 @@ export function errorCardActions(surface: ErrorSurface | null | undefined): Erro
   }
 
   // Another provider only helps when the provider side failed (not the gateway or the disk).
-  return { primary: errorRecoveryPlan(surface).switchProvider ? 'switch_provider' : null }
+  return { primary: SWITCH_PROVIDER_LAYERS.includes(surface.layer) ? 'switch_provider' : null }
+}
+
+/** Whether the card for this failure offers `action` (as its main action or second option). */
+export function errorCardOffers(surface: ErrorSurface | null | undefined, action: ErrorActionId): boolean {
+  const { primary, secondary } = errorCardActions(surface)
+
+  return primary === action || secondary === action
 }
 
 /**
