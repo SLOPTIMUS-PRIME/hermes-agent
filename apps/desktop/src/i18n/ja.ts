@@ -1381,6 +1381,10 @@ export const jaOverrides = {
     changesApplyNewSessions: '変更は新しいセッションに適用されます。',
     skillUpdated: 'スキルを更新しました',
     edit: '編集',
+    lock: 'ロック',
+    locked: 'ロック中',
+    lockHint: 'ロック中はエージェントがこのスキルを変更できません。自分では引き続き編集できます。',
+    unlockedHint: 'ロックすると、エージェントはこのスキルを変更できなくなります。自分では引き続き編集できます。',
     archive: 'アーカイブ',
     skillArchivedTitle: 'スキルをアーカイブしました',
     skillArchivedMessage: 'hermes curator restore で復元できます。',
@@ -1795,10 +1799,7 @@ export const jaOverrides = {
     fleet: {
       localDevice:
         'このデバイス（ローカルバックエンド — Hermes が無ければインストールし、あれば新しいセッションを開きます）',
-      switchDeviceTitle: 'このデバイスに切り替えますか？',
-      switchDeviceDesc: 'このコンピュータで新しいセッションを開きます。今の会話は別のゲートウェイに残ります。',
-      switchDeviceConfirm: '切り替える',
-      installDeviceTitle: 'このデバイスに切り替えますか？',
+      installDeviceTitle: 'このデバイスに Hermes をインストールしますか？',
       installDeviceDesc:
         'Hermes をローカルにインストールしてから、このコンピュータで新しいセッションを開きます。確認するまでインストールは始まりません。',
       installDeviceConfirm: 'ローカルにインストール',
