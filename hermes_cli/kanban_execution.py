@@ -75,7 +75,7 @@ def required(conn=None):
 
 
 def _required_at(path):
-    import yaml
+    import hermes_yaml as yaml
     try:
         raw = path.read_text(encoding='utf-8')
     except FileNotFoundError:
