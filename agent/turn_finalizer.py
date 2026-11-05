@@ -50,13 +50,25 @@ def _record_kanban_budget_exhausted(
     """Record a terminal ``timed_out`` outcome for a kanban worker out of budget.
 
     Routed via ``_record_task_failure`` (not ``kanban_block``) so it counts toward the
-    consecutive-failure circuit breaker. Idempotent via the ``_end_run`` CAS
-    (``WHERE ended_at IS NULL``), so safe from multiple exit paths.
+    consecutive-failure circuit breaker. The record is pinned to THIS worker's own
+    attempt via ``HERMES_KANBAN_RUN_ID`` (``expected_run_id``), so a stale finalizer
+    from a reclaimed attempt can never increment, release, or close a replacement
+    attempt; the ``_end_run`` CAS (``WHERE ended_at IS NULL``) keeps it idempotent
+    across multiple exit paths.
 
-    This is a bounded fallback (#87096): the CAS invariant in ``_end_run`` (``WHERE ended_at IS NULL``)
-    guarantees idempotence — if another path already closed the run this is a no-op — so it is safe to call
-    from multiple exit paths.
+    This is a bounded fallback (#87096). Without a valid own-attempt id the record
+    is skipped entirely (fail closed): the dispatcher's crash/timeout sweep owns
+    accounting for an attempt it can identify, and an unpinned record would bind to
+    whatever run happens to be current.
     """
+    raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+    if not (raw_run_id.isascii() and raw_run_id.isdigit() and int(raw_run_id) > 0):
+        logger.warning(
+            "Skipping budget-exhausted failure for task %s: no valid HERMES_KANBAN_RUN_ID (%r); "
+            "dispatcher sweep owns accounting for the unidentified attempt",
+            kanban_task, raw_run_id,
+        )
+        return
     try:
         from hermes_cli import kanban_db as _kb
         from hermes_cli import kanban_db_connect as _kbc
@@ -73,6 +85,7 @@ def _record_kanban_budget_exhausted(
                 outcome="timed_out",
                 release_claim=True,
                 end_run=True,
+                expected_run_id=int(raw_run_id),
                 event_payload_extra={"budget_used": api_call_count, "budget_max": max_iterations},
             )
         finally:

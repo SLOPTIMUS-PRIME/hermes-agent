@@ -1,6 +1,7 @@
 """Trusted dispatcher claims enter the ordinary owner's durable admission queue."""
 import asyncio
 import contextlib
+import copy
 from contextlib import closing
 from dataclasses import asdict, replace
 import threading
@@ -35,18 +36,27 @@ def build_kanban_policy(connection, params, config):
                     or task.current_run_id != params['run_id'] or run['task_id'] != task.id
                     or task.claim_lock != params['claim_lock'] or run['claim_lock'] != task.claim_lock):
                 raise RuntimeStoreError('stale_kanban_claim')
-            if Path(resolve_profile_env(task.assignee)).resolve() != Path(authority.profile_id).resolve():
+            from hermes_cli.kanban_execution import read_binding, execution_task
+            binding = read_binding(conn, task.id, params["run_id"], params["claim_lock"])
+            task = execution_task(task, binding)
+            if binding and binding["spec"]["board"] != board:
+                raise ValueError("invalid_execution_binding")
+            owner = binding['spec']['profile_id'] if binding else resolve_profile_env(task.assignee)
+            if (not isinstance(owner, str) or not Path(owner).is_absolute()
+                    or Path(owner).resolve() != Path(authority.profile_id).resolve()):
                 raise RuntimeStoreError('profile_mismatch')
             bound = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='owner_admitted' ORDER BY id DESC LIMIT 1",
                                  (task.id, task.current_run_id)).fetchone()
             if bound and json.loads(bound[0])['request_id'] != 'kanban:' + json.dumps([board, task.id, task.current_run_id], separators=(',', ':')):
                 raise RuntimeStoreError('stale_kanban_claim')
-            context = kb.build_worker_context(conn, task.id)
-            skills = list(task.skills or ())
-            if kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review':
+            context = binding["spec"]["context"] if binding else kb.build_worker_context(conn, task.id)
+            skills = list(binding["spec"]["skills"] if binding else (task.skills or ()))
+            if not binding and kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review':
                 # Same rule as the dispatcher's review lane: the reviewer always loads sdlc-review.
                 skills = list(dict.fromkeys([*skills, 'sdlc-review']))
-    except (ValueError, OSError, sqlite3.Error) as exc:
+    except RuntimeStoreError:
+        raise
+    except (KeyError, TypeError, ValueError, OSError, sqlite3.Error) as exc:
         raise RuntimeStoreError('invalid_kanban_claim') from exc
     cwd = task.workspace_path
     params_policy = {'source': 'cli', 'cwd': cwd}
@@ -54,6 +64,14 @@ def build_kanban_policy(connection, params, config):
         if value:
             params_policy[name] = value
     private = {}
+    if binding:
+        # A prompt hook may reread the card after claim and inject live task text.
+        # Remove that source from the frozen worker config, not merely consent:
+        # allowlisted/hooks_auto_accept hooks otherwise still execute. Keep tool
+        # policy hooks and all ordinary unsealed session behavior unchanged.
+        config = copy.deepcopy(config)
+        if isinstance(config.get('hooks'), dict):
+            config['hooks'].pop('pre_llm_call', None)
     policy = build_policy(params_policy, config, private_secrets=private)
     if policy.model is None:
         from gateway.run import _resolve_gateway_model
@@ -64,6 +82,8 @@ def build_kanban_policy(connection, params, config):
         goal_text='\n\n'.join(p for p in (task.title, task.body) if p), context=context,
         max_runtime_seconds=task.max_runtime_seconds, accept_hooks=True)
     context['db'] = str(path)
+    if binding:
+        context['execution_binding'] = binding
     request = json.loads(policy.request_json)
     request.update(source='kanban', board=board, task_id=task.id, run_id=task.current_run_id)
     return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(set(policy.toolsets) | {'kanban'})),
@@ -80,6 +100,8 @@ async def run_task(connection, params):
     from hermes_state_local import local_receipt
     from gateway.session_policy import restore_policy
     authority = connection.authority
+    if connection.actor.profile_id != authority.profile_id:
+        raise RuntimeStoreError('profile_mismatch')
     # Resolved off-loop up front: no await separates the saved-claim check from session
     # creation. The Kanban claim check and its marker share one off-loop transaction; a
     # concurrent retry of the same attempt meets that marker (same session) or a stale claim.
@@ -107,37 +129,59 @@ async def run_task(connection, params):
     import psutil
     from hermes_cli.process_identity import worker_birth
     context = json.loads(policy.kanban_json)
+    from hermes_state_runtime import find_session_admission
+    committed = None if not saved else await asyncio.to_thread(find_session_admission, authority.db,
+        principal_id=connection.actor.subject, session_id=ref.session_id, request_id=request_id)
 
     def admit_claim():
         # The Kanban DB is the cross-profile dispatch bus (busy_timeout up to 120 s): the claim
         # check and its marker share one write transaction, off the owner loop.
         with connect_closing(Path(context['db'])) as conn, kb.write_txn(conn):
+            from hermes_cli.kanban_execution import read_run_binding, verify_context
+            binding = read_run_binding(conn, params['task_id'], params['run_id'])
+            if binding != context.get('execution_binding'):
+                raise RuntimeStoreError('invalid_execution_binding')
+            if binding and binding['spec']['profile_id'] != str(Path(authority.profile_id).resolve()):
+                raise RuntimeStoreError('profile_mismatch')
+            run = kb.get_run(conn, params['run_id'])
+            if run is None or run.claim_lock != params['claim_lock']:
+                raise RuntimeStoreError('stale_kanban_claim')
             # Either this exact attempt was already admitted to this session (retry after a
             # crash between session creation and admission), or the claim is still current
             # now; a reclaimed/closed task never reaches resume/submit.
             marker = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='owner_admitted' ORDER BY id DESC LIMIT 1",
                                   (params['task_id'], params['run_id'])).fetchone()
             if marker:
-                if json.loads(marker[0])['session_id'] != ref.session_id:
+                marker = json.loads(marker[0])
+                if (not isinstance(marker, dict) or marker.get('session_id') != ref.session_id
+                        or marker.get('db') != owner_db or marker.get('request_id') != request_id):
                     raise RuntimeStoreError('stale_kanban_claim')
-            else:
+            if run.status != 'running':
+                # Historical identity can recover only an already committed
+                # receipt. Never resume or submit new work for an ended run.
+                if not (saved and marker and committed):
+                    raise RuntimeStoreError('stale_kanban_claim')
+                return committed['admission_id']
+            verify_context(conn, context)
+            if not marker:
                 task = kb.get_task(conn, params['task_id'])
-                if not (task and task.status == 'running' and task.current_run_id == params['run_id'] and task.claim_lock == params['claim_lock']):
+                if task is None:
                     raise RuntimeStoreError('stale_kanban_claim')
                 kb._append_event(conn, task.id, 'owner_admitted',
                     {'db': owner_db, 'session_id': ref.session_id,
                      'request_id': request_id, 'pid': os.getpid(), 'birth': worker_birth(psutil.Process())},
                     run_id=task.current_run_id)
+            return None
     from gateway.session_runtime_workers import tracked_write
-    await tracked_write(authority, admit_claim)
+    terminal_admission_id = await tracked_write(authority, admit_claim)
+    if terminal_admission_id is not None:
+        receipt = await authority.receipt(connection.actor, ref, terminal_admission_id)
+        return {'session_id': ref.session_id, 'receipt': asdict(receipt)}
     await connection.resume(ref, {})
     # Finite like the `chat -q` worker it replaced: nobody can answer an approval or clarify in a
     # card (approvals.single_query_mode applies). Never unattended: that is `-z`'s auto-approval.
     # A retry of an attempt admitted before cards were finite resubmits its committed payload,
     # so the store returns the original receipt instead of admission_conflict.
-    from hermes_state_runtime import find_session_admission
-    committed = None if not saved else await asyncio.to_thread(find_session_admission, authority.db,
-        principal_id=connection.actor.subject, session_id=ref.session_id, request_id=request_id)
     payload: dict = {'text': f'work kanban task {params["task_id"]}'}
     if committed is None or 'finite' in committed['payload']:
         payload['finite'] = True
@@ -160,6 +204,13 @@ def bind_worker_context(frame):
         return
     if frame['policy']['source'] != 'kanban':
         raise ValueError('invalid_kanban_policy')
+    if context.get('execution_binding'):
+        # Saved pre-upgrade policies are not permission to reintroduce this
+        # mutable input channel. Check before register_worker_hooks runs.
+        from agent.shell_hooks import iter_configured_hooks
+        if any(h.event == 'pre_llm_call' for h in iter_configured_hooks(
+                json.loads(frame['policy']['config_json']))):
+            raise ValueError('execution_prompt_hooks_forbidden')
     env = {'HERMES_KANBAN_TASK': context['task_id'], 'HERMES_KANBAN_BOARD': context['board'],
         'HERMES_KANBAN_DB': context['db'], 'HERMES_KANBAN_RUN_ID': str(context['run_id']),
         'HERMES_KANBAN_CLAIM_LOCK': context['claim_lock'], 'HERMES_KANBAN_WORKSPACE': context['workspace'],
@@ -183,6 +234,15 @@ def bind_worker_context(frame):
             if (task is None or task.status != 'running' or task.current_run_id != context['run_id']
                     or task.claim_lock != context['claim_lock']):
                 raise RuntimeStoreError('stale_kanban_claim')
+            from hermes_cli.kanban_execution import read_binding, verify_context, bind_worker
+            binding = read_binding(conn, context['task_id'], context['run_id'], context['claim_lock'])
+            if binding or context.get('execution_binding'):
+                binding = verify_context(conn, context)
+                if binding is None:
+                    raise ValueError('invalid_execution_binding')
+                if binding['spec']['profile_id'] != str(Path(frame['home']).resolve()):
+                    raise RuntimeStoreError('profile_mismatch')
+            bind_worker(binding)
             # The dispatcher's spawned worker stays the run's pid (reclaim, timeout and operator
             # kills target it; ``_watch_submitter`` ties this interpreter's life to it). The bound
             # interpreter is recorded beside it so a sweep can tell when the attempt is truly gone.
@@ -381,16 +441,50 @@ def worker_exit_code(path, params):
 KANBAN_TURN_AUTHOR = {'id': 'kanban:dispatcher', 'name': 'Kanban dispatcher', 'is_bot': True}
 
 
+def _verify_inference_binding(context):
+    """Prove the adopted capsule AND the current native lease before inference.
+
+    A self-consistent digest in a replacement frame is not process adoption.
+    Legacy unsealed workers retain their ordinary default-off behavior.
+    """
+    from hermes_cli.kanban_execution import worker_binding, verify_context
+    binding = worker_binding()
+    if binding != context.get('execution_binding'):
+        raise ValueError('invalid_execution_binding')
+    if binding is not None:
+        with closing(sqlite3.connect(Path(context['db']).resolve().as_uri() + '?mode=ro', uri=True)) as conn:
+            conn.row_factory = sqlite3.Row
+            verify_context(conn, context)
+        if not _bound_claim_is_live(context):
+            raise RuntimeStoreError('stale_kanban_claim')
+    return binding
+
+
 def _run_task_turns(agent, frame, history, context):
     from agent.skill_commands import build_preloaded_skills_prompt
-    skills, loaded, missing = build_preloaded_skills_prompt(context['skills'], task_id=agent.session_id)
-    if missing and not loaded:
-        raise ValueError('kanban_skills_unavailable')
-    prompt = '\n\n'.join(p for p in (skills, context['context'], frame['text']) if p)
+    binding = _verify_inference_binding(context)
+    if binding:
+        spec = binding['spec']
+        skills = '\n\n'.join(spec['skill_prompts'][name] for name in spec['skills'])
+        # All task-sourced inference/goal input comes from the sealed value, not
+        # duplicated policy fields or a later edit to the live card/skill files.
+        context = dict(context, context=spec['context'],
+            goal_mode=spec['task']['goal_mode'], goal_max_turns=spec['task']['goal_max_turns'],
+            goal_text='\n\n'.join(p for p in (spec['task']['title'], spec['task']['body']) if p))
+        text = f"work kanban task {binding['task_id']}"
+    else:
+        from hermes_cli.kanban_execution import require_expected
+        require_expected(None)
+        skills, loaded, missing = build_preloaded_skills_prompt(context['skills'], task_id=agent.session_id)
+        if missing and not loaded:
+            raise ValueError('kanban_skills_unavailable')
+        text = frame['text']
+    prompt = '\n\n'.join(p for p in (skills, context['context'], text) if p)
     result = agent.run_conversation(prompt, conversation_history=history, turn_author=KANBAN_TURN_AUTHOR)
 
     def recover(nudge):
         nonlocal result
+        _verify_inference_binding(context)
         prior = result.get('messages') if isinstance(result, dict) else None
         result = agent.run_conversation(nudge, conversation_history=prior or
                                         agent._session_db.get_messages_as_conversation(agent.session_id),
@@ -416,6 +510,7 @@ def _run_task_turns(agent, frame, history, context):
             kb.block_task(conn, context['task_id'], reason=reason, expected_run_id=context['run_id'])
     def turn(prompt):
         nonlocal result
+        _verify_inference_binding(context)
         result = agent.run_conversation(prompt, conversation_history=agent._session_db.get_messages_as_conversation(agent.session_id),
                                         turn_author=KANBAN_TURN_AUTHOR)
         return result.get('final_response', '')

@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
@@ -448,6 +449,14 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
 
 # --- Goal-mode judge gate ---
 
+def _handoff_task(kb, conn, tid: str):
+    """Resolve sealed policy before judge availability/fail-open handling."""
+    from hermes_cli.kanban_execution import worker_show
+
+    sealed = worker_show(conn, tid)
+    return kb.get_task(conn, tid) if sealed is None else SimpleNamespace(**sealed['task'])
+
+
 _GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input"})
 
 
@@ -618,6 +627,9 @@ def inject_new_comments_from_env(agent: Any) -> bool:
     """Steer new operator comments on the worker's task into ``agent``; True iff a
     steer was injected; never raises. Own comments (``_persisted_identity``) are skipped."""
     global _comment_poll_last_attempt
+    from hermes_cli.kanban_execution import worker_binding, required
+    if worker_binding() is not None or (os.environ.get("HERMES_KANBAN_TASK") and required()):
+        return False
     # Operator notes address the dispatcher-owned worker; a delegate_task child sharing
     # this process must neither receive them nor advance the shared watermark (#112817).
     tid = os.environ.get("HERMES_KANBAN_TASK") if _is_dispatcher_owned_worker() else None
@@ -675,6 +687,10 @@ def _handle_show(args: dict, **kw) -> str:
                 "the board, then kanban_show(task_id=<id>) for full state."),
         })
     with _board(args.get("board")) as (kb, conn):
+        from hermes_cli.kanban_execution import worker_show
+        sealed = worker_show(conn, tid)
+        if sealed is not None:
+            return json.dumps(sealed)
         task = _existing_task(kb, conn, tid)
         return json.dumps({
             "task": _fields(task, _TASK_FIELDS),
@@ -744,7 +760,7 @@ def _handle_complete(args: dict, **kw) -> str:
         # Goal-mode pre-completion judge gate (Issue #38367). Prevent workers from bypassing the auxiliary
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
-        task = kb.get_task(conn, tid)
+        task = _handoff_task(kb, conn, tid)
         _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
             ok = kb.complete_task(
@@ -897,7 +913,7 @@ def _handle_request_review(args: dict, **kw) -> str:
                f"reviewer profile {reviewer!r} is not installed. "
                f"Installed profiles: {', '.join(list_profile_names())}")
     with _board(args.get("board")) as (kb, conn):
-        _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
+        _goal_gate("kanban_request_review", _handoff_task(kb, conn, tid), tid, summary)
         try:
             ok, fail_reason = kb.request_review(
                 conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,
@@ -1063,14 +1079,22 @@ def _handle_attach_url(args: dict, **kw) -> str:
 
 @_kanban_handler("kanban_attachments")
 def _handle_attachments(args: dict, **kw) -> str:
-    """List a task's attachments (read-only; no ownership restriction)."""
+    """List sealed inputs for a bound worker; legacy reads remain unrestricted."""
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
-        _existing_task(kb, conn, tid)
+        from hermes_cli.kanban_execution import worker_show
+
+        sealed = worker_show(conn, tid)
+        if sealed is not None:
+            _check(isinstance(sealed.get('attachments'), list), 'invalid_execution_attachments')
+            attachments = [{key: a[key] for key in _ATTACHMENT_FIELDS}
+                           for a in sealed['attachments']]
+        else:
+            _existing_task(kb, conn, tid)
+            attachments = [_fields(a, _ATTACHMENT_FIELDS) for a in kb.list_attachments(conn, tid)]
         return json.dumps({
             "ok": True, "task_id": tid,
-            "attachments": [
-                _fields(a, _ATTACHMENT_FIELDS) for a in kb.list_attachments(conn, tid)]})
+            "attachments": attachments})
 
 
 def _persisted_session_id(session_id: Optional[str]) -> Optional[str]:

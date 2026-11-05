@@ -58,6 +58,9 @@ def _cmd_tail(args: argparse.Namespace) -> int:
 
 
 def _cmd_dispatch(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_execution_cli import read_object
+    from hermes_cli.kanban_execution import dispatch_specs
+    expected = dispatch_specs(read_object(getattr(args, "expected_specs", None)))
     # Honour kanban.default_assignee, kanban.max_in_progress,
     # kanban.max_in_progress_per_profile and kanban.max_spawn with the same
     # semantics as the gateway dispatch path.
@@ -90,6 +93,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            **({"expected_specs": expected} if expected is not None else {}),
         )
     if getattr(args, "json", False):
         _print_json({

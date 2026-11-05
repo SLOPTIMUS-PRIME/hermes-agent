@@ -655,10 +655,10 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, t.worker_started_at, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
-        "       t.max_runtime_seconds, t.claim_lock "
+        "       t.max_runtime_seconds, t.claim_lock, r.id AS execution_run_id "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
-        "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
+        "WHERE t.status = 'running' "
         "  AND COALESCE(r.started_at, t.started_at) IS NOT NULL "
         "  AND t.worker_pid IS NOT NULL"
     ).fetchall()
@@ -672,7 +672,12 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         # Runtime is per attempt: ``tasks.started_at`` records the FIRST start,
         # so retries must be measured from the active task_runs row.
         elapsed = now - (_kb._to_epoch(row["active_started_at"]) or now)  # unreadable clock: never kill
-        limit = int(row["max_runtime_seconds"])
+        from hermes_cli.kanban_execution_limits import attempt_limit
+        bound_limit = attempt_limit(conn, row["id"], "max_runtime_seconds",
+                                    row["max_runtime_seconds"], run_id=row["execution_run_id"])
+        if bound_limit is None:
+            continue
+        limit = int(bound_limit)
         if elapsed < limit:
             continue
 
@@ -727,18 +732,17 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
                 )
                 _kb._append_event(conn, tid, "timed_out", payload, run_id=run_id)
                 timed_out.append(tid)
-        # Outside the write_txn above because ``_record_task_failure`` opens its
-        # own. If the breaker trips this flips the task to ``blocked`` and emits
-        # ``gave_up`` on top of the ``timed_out`` already emitted.
-        if cur.rowcount == 1:
-            _record_task_failure(
-                conn, tid,
-                error=error,
-                outcome="timed_out",
-                release_claim=False,
-                end_run=False,
-                event_payload_extra={"pid": pid, "sigkill": killed, "retry_status": retry_status},
-            )
+                # Keep retry publication and failure accounting atomic. A second
+                # dispatcher must never claim between _end_run and the breaker.
+                _record_task_failure(
+                    conn, tid,
+                    error=error,
+                    outcome="timed_out",
+                    release_claim=False,
+                    end_run=False,
+                    expected_run_id=run_id,
+                    event_payload_extra={"pid": pid, "sigkill": killed, "retry_status": retry_status},
+                )
     return timed_out
 
 
@@ -1153,9 +1157,9 @@ class _CrashSweep:
 
     crashed: list[str] = field(default_factory=list)
     rate_limited: list[str] = field(default_factory=list)
-    # ``(task_id, pid, claimer, dead_worker)``: accounted after the txn via
-    # ``_record_task_failure`` (needs its own write_txn).
-    crash_details: list[tuple[str, int, str, _DeadWorker]] = field(default_factory=list)
+    # Exact attempt ID survives _end_run; host:pid claimers are reusable.
+    # Accounting completes under the same outer transaction as reclamation.
+    crash_details: list[tuple[str, int, str, _DeadWorker, Optional[int]]] = field(default_factory=list)
     # Worker-exit observer payloads, fired only after every reclaim/accounting
     # txn has committed.
     exited_hook_payloads: list[dict] = field(default_factory=list)
@@ -1164,7 +1168,7 @@ class _CrashSweep:
 def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None) -> _CrashSweep:
     """Release every host-local ``running`` task whose worker PID is dead."""
     sweep = _CrashSweep()
-    with _kb.write_txn(conn):
+    with _kb.write_txn(conn, allow_nested=True):
         rows = conn.execute(
             "SELECT id, worker_pid, worker_started_at, claim_lock, started_at, assignee "
             "FROM tasks "
@@ -1235,11 +1239,17 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 sweep.rate_limited.append(row["id"])
             else:
                 sweep.crashed.append(row["id"])
-                sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
+                sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead, run_id))
     return sweep
 
 
 def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]:
+    # This helper also has direct callers; bind validation and accounting together.
+    with _kb.write_txn(conn, allow_nested=True):
+        return _account_crashes_locked(conn, crash_details)
+
+
+def _account_crashes_locked(conn: sqlite3.Connection, crash_details: list) -> list[str]:
     """Count each crash against the breaker; returns the task ids it tripped.
 
     Protocol violations get a BOUNDED violation-only budget independent of
@@ -1250,17 +1260,24 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
     """
     auto_blocked: list[str] = []
     fp_counts: dict[str, int] = {}
-    for _, _, _, dead in crash_details:
+    for _, _, _, dead, _ in crash_details:
         fp = _error_fingerprint(dead.error_text)
         fp_counts[fp] = fp_counts.get(fp, 0) + 1
-    for tid, pid, claimer, dead in crash_details:
+    for tid, pid, claimer, dead, run_id in crash_details:
+        latest = _kb.latest_run(conn, tid)
+        if run_id is not None:
+            if latest is None or latest.id != run_id or latest.claim_lock != claimer:
+                continue  # Never account an old receipt against a replacement run.
+        elif latest is not None:
+            continue  # Unpinned legacy rows cannot stand in for a recorded attempt.
         error_text = dead.error_text
         if dead.protocol_violation:
             streak = _protocol_violation_streak(conn, tid)
             trow = conn.execute("SELECT max_retries FROM tasks WHERE id = ?", (tid,)).fetchone()
             if trow is None:
                 continue  # task deleted mid-loop
-            task_override = _kb._row_get(trow, "max_retries")
+            from hermes_cli.kanban_execution_limits import attempt_limit
+            task_override = attempt_limit(conn, tid, "max_retries", _kb._row_get(trow, "max_retries"), run_id=run_id)
             violation_limit = (
                 int(task_override) if task_override is not None else _PROTOCOL_VIOLATION_FAILURE_LIMIT
             )
@@ -1274,6 +1291,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 conn, tid,
                 error=error_text,
                 outcome="crashed",
+                expected_run_id=run_id,
                 failure_limit=violation_limit,
                 force_trip=True,
                 release_claim=False,
@@ -1294,6 +1312,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 conn, tid,
                 error=error_text,
                 outcome="crashed",
+                expected_run_id=run_id,
                 force_trip=True,
                 release_claim=False,
                 end_run=False,
@@ -1309,6 +1328,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 conn, tid,
                 error=error_text,
                 outcome="crashed",
+                expected_run_id=run_id,
                 failure_limit=1 if is_systemic else None,
                 release_claim=False,
                 end_run=False,
@@ -1329,9 +1349,10 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     wall, released WITHOUT counting a failure and surfaced via the
     ``_last_rate_limited`` attribute (the return stays crashed-only).
     """
-    sweep = _reclaim_dead_workers(conn, board=board)
-    # Outside the main txn: account each crash and maybe trip the breaker.
-    auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
+    # No retryable state is committed before its failure budget is settled.
+    with _kb.write_txn(conn):
+        sweep = _reclaim_dead_workers(conn, board=board)
+        auto_blocked = _account_crashes(conn, sweep.crash_details) if sweep.crash_details else []
     # Side-channel attributes keep the public ``list[str]`` return stable;
     # ``dispatch_once`` reads them to populate ``DispatchResult``. Rate-limited
     # requeues did NOT count a failure and are NOT crashes.
@@ -1380,6 +1401,7 @@ def _record_task_failure(
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
     infrastructure: bool = False,
+    expected_run_id: int | None = None,
 ) -> bool:
     """Record a non-success outcome and maybe trip the circuit breaker; every
     non-success path funnels through here so ``consecutive_failures`` stays
@@ -1402,13 +1424,26 @@ def _record_task_failure(
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     error = error[:500]
-    with _kb.write_txn(conn):
+    with _kb.write_txn(conn, allow_nested=True):
         row = conn.execute(
             "SELECT consecutive_failures, status, max_retries, current_run_id "
             "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if row is None:
             return False
+        accounting_run_id = row["current_run_id"]
+        if expected_run_id is not None:
+            if type(expected_run_id) is not int or expected_run_id <= 0:
+                raise ValueError("invalid_failure_run")
+            latest = _kb.latest_run(conn, task_id)
+            if latest is None or latest.id != expected_run_id:
+                return False  # A delayed failure must not mutate a replacement attempt.
+            if release_claim:
+                if row["status"] != "running" or accounting_run_id != expected_run_id:
+                    return False
+            elif accounting_run_id is not None or row["status"] not in ("ready", "review"):
+                return False
+            accounting_run_id = expected_run_id
         retry_status = (
             _kb._retry_status_for_run(conn, task_id, row["current_run_id"])
             if release_claim
@@ -1417,7 +1452,9 @@ def _record_task_failure(
         failures = int(row["consecutive_failures"]) + (0 if infrastructure else 1)
 
         # Per-task override wins over caller-supplied and default thresholds.
-        task_override = _kb._row_get(row, "max_retries")
+        from hermes_cli.kanban_execution_limits import attempt_limit
+        task_override = attempt_limit(conn, task_id, "max_retries", _kb._row_get(row, "max_retries"),
+                                      run_id=accounting_run_id)
         if task_override is not None:
             effective_limit, limit_source = int(task_override), "task"
         else:
@@ -1468,7 +1505,7 @@ def _record_task_failure(
             "trigger_outcome": outcome,
             "retry_status": retry_status,
         }
-        run_id = None
+        run_id = accounting_run_id
         if end_run:
             # Only the spawn path has an open run to close.
             run_id = _kb._end_run(
@@ -1991,6 +2028,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    expected_specs: Optional[dict[str, dict]] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -2000,6 +2038,9 @@ def dispatch_once(
     ``skipped_locked=True`` and writes nothing; the lock is keyed on the
     resolved DB path so unrelated boards tick in parallel.
     """
+    from hermes_cli.kanban_execution import dispatch_specs
+    expected_specs = dispatch_specs(expected_specs, conn)
+
     def _locked_tick() -> DispatchResult:
         return _dispatch_once_locked(
             conn,
@@ -2014,6 +2055,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
+            expected_specs=expected_specs,
         )
 
     try:
@@ -2063,6 +2105,7 @@ def _dispatch_lane_task(
     spawn_fn,
     per_profile_cap: Optional[int],
     per_profile_running: dict[str, int],
+    expected_spec: Optional[dict] = None,
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
     Returns True when a spawn slot was consumed (real or ``dry_run``); every
@@ -2119,13 +2162,20 @@ def _dispatch_lane_task(
             per_profile_running[name] = per_profile_running.get(name, 0) + 1
 
     if dry_run:
+        from hermes_cli.kanban_execution import check_expected
+        check_expected(conn, task_id, expected_spec, lane)
         result.spawned.append((task_id, assignee, ""))
         _count_spawn(assignee)
         return True
     claim = _kb.claim_review_task if lane == "review" else _kb.claim_task
-    claimed = claim(conn, task_id, ttl_seconds=ttl_seconds)
+    claimed = claim(conn, task_id, ttl_seconds=ttl_seconds,
+                    **({"expected_spec": expected_spec} if expected_spec is not None else {}))
     if claimed is None:
         return False
+    if expected_spec is not None:
+        from hermes_cli.kanban_execution import read_binding, execution_task
+        binding = read_binding(conn, claimed.id, claimed.current_run_id, claimed.claim_lock)
+        claimed = execution_task(claimed, binding)
     try:
         resolved_branch_name = None
         if claimed.workspace_kind == "worktree":
@@ -2136,6 +2186,7 @@ def _dispatch_lane_task(
         if _record_task_failure(
             conn, claimed.id, f"workspace: {exc}",
             outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
+            expected_run_id=claimed.current_run_id,
         ):
             result.auto_blocked.append(claimed.id)
         return False
@@ -2171,6 +2222,7 @@ def _dispatch_lane_task(
             conn, claimed.id, str(exc),
             outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
             infrastructure=infrastructure,
+            expected_run_id=claimed.current_run_id,
         ):
             result.auto_blocked.append(claimed.id)
         return False
@@ -2366,12 +2418,15 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    expected_specs: Optional[dict[str, dict]] = None,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
     call ``spawn_fn(task, workspace_path, board) -> Optional[int]``, recording
     the PID so later ticks catch crashes before the TTL. Cap semantics:
     :func:`_tick_spawn_budget`."""
+    from hermes_cli.kanban_execution import dispatch_specs
+    expected_specs = dispatch_specs(expected_specs, conn)
     result = DispatchResult()
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
@@ -2387,6 +2442,11 @@ def _dispatch_once_locked(
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
     review_rows = _lane_rows(conn, "review") if review_dispatch_enabled() else []
+    if expected_specs is not None:
+        # An insertion can never enlarge this private, validated allowlist. The
+        # per-card payload comparison remains inside the native claim transaction.
+        ready_rows = [r for r in ready_rows if r["id"] in expected_specs]
+        review_rows = [r for r in review_rows if r["id"] in expected_specs]
     # Per-profile cap. Deferred tasks go to skipped_per_profile_capped, not
     # skipped_unassigned — "busy, retry later" differs from "needs routing".
     # Resolved BEFORE the review reservation so the reservation can see which
@@ -2438,7 +2498,8 @@ def _dispatch_once_locked(
                 continue
             row_assignee = default_assignee
             result.auto_assigned_default.append(row["id"])
-        if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready", **lane_kwargs):
+        if _dispatch_lane_task(conn, row, row_assignee, result, lane="ready",
+                **({"expected_spec": expected_specs[row["id"]]} if expected_specs is not None else {}), **lane_kwargs):
             spawned += 1
 
     # A review agent (sdlc-review) approves (→ done) or requests changes
@@ -2451,7 +2512,8 @@ def _dispatch_once_locked(
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
             continue
-        if _dispatch_lane_task(conn, row, row["assignee"], result, lane="review", **lane_kwargs):
+        if _dispatch_lane_task(conn, row, row["assignee"], result, lane="review",
+                **({"expected_spec": expected_specs[row["id"]]} if expected_specs is not None else {}), **lane_kwargs):
             spawned += 1
     return result
 

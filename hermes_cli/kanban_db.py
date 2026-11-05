@@ -1866,9 +1866,12 @@ def _end_run(
     is wiped, and :func:`kanban_db_dispatch.reap_terminal_workers` needs them
     to end a worker that survived its own terminal transition."""
     now = int(time.time())
+    from hermes_cli.kanban_execution import reject_reserved, merge_run_metadata
+    reject_reserved(metadata)
     run_id = _current_run_id(conn, task_id)
     if run_id is None:
         return None
+    metadata = merge_run_metadata(conn, run_id, metadata)
     conn.execute(
         """
         UPDATE task_runs
@@ -1949,6 +1952,8 @@ def _synthesize_ended_run(
     ``profile`` overrides the profile read off the task row: transitions that
     reassign the task (e.g. review handoff) pass the acting profile captured
     before the rewrite, so the run names the actor, not the new assignee."""
+    from hermes_cli.kanban_execution import reject_reserved
+    reject_reserved(metadata)
     now = int(time.time())
     trow = conn.execute(
         "SELECT assignee, current_step_key FROM tasks WHERE id = ?", (task_id,),
@@ -2123,10 +2128,14 @@ def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[st
 
 def _claim_and_open_run(
     conn: sqlite3.Connection, task_id: str, source_status: str, lock: str, expires: int, now: int,
-    *, event_extra: Optional[dict] = None,
+    *, event_extra: Optional[dict] = None, expected_spec: Optional[dict] = None,
 ) -> Optional[int]:
     """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
     when the CAS lost. Caller holds the txn."""
+    from hermes_cli.kanban_execution import check_expected, seal
+    spec = check_expected(conn, task_id, expected_spec, source_status)
+    if spec is not None and not conn.in_transaction:
+        raise ValueError("execution_claim_requires_transaction")
     cur = conn.execute(
         f"""
         UPDATE tasks
@@ -2165,18 +2174,21 @@ def _claim_and_open_run(
         conn, task_id, "claimed",
         {"lock": lock, "expires": expires, "run_id": run_id, **(event_extra or {})}, run_id=run_id,
     )
+    seal(conn, task_id, run_id, lock, spec)
     return run_id
 
 
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, expected_spec: Optional[dict] = None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
     Returns the claimed ``Task`` on success, ``None`` if the task was
     already claimed (or is not in ``ready`` status).
     """
+    from hermes_cli.kanban_execution import require_expected
+    require_expected(expected_spec, conn)
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -2195,7 +2207,7 @@ def claim_task(
         _reclaim_dangling_run(
             conn, task_id, statuses=("ready",), now=now, note="invariant recovery on re-claim",
         )
-        run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now)
+        run_id = _claim_and_open_run(conn, task_id, "ready", lock, expires, now, expected_spec=expected_spec)
         if run_id is None:
             return None
         claimed = get_task(conn, task_id)
@@ -2205,11 +2217,13 @@ def claim_task(
 
 def claim_review_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, expected_spec: Optional[dict] = None,
 ) -> Optional[Task]:
     """Atomic ``review -> running`` (None when lost). Parents are re-checked
     (one may have reopened meanwhile) and a NEW run tracks the reviewer
     separately from the implementer."""
+    from hermes_cli.kanban_execution import require_expected
+    require_expected(expected_spec, conn)
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -2227,6 +2241,7 @@ def claim_review_task(
             return None
         run_id = _claim_and_open_run(
             conn, task_id, "review", lock, expires, now, event_extra={"source_status": "review"},
+            expected_spec=expected_spec,
         )
         if run_id is None:
             return None
@@ -2410,15 +2425,13 @@ def release_stale_claims(
                 },
             )
             reclaimed += 1
-        # Own txn, after the reclaim commit (same shape as ``enforce_max_runtime``):
-        # the run ended without a verdict, so it counts toward the breaker and a
-        # trip flips the task to ``blocked`` + ``gave_up`` on top of ``reclaimed``.
-        _record_task_failure(
-            conn, row["id"], error,
-            outcome="reclaimed", failure_limit=failure_limit,
-            release_claim=False, end_run=False,
-            event_payload_extra={"worker_pid": _opt_int(row["worker_pid"]), "retry_status": retry_status},
-        )
+            # Settle the ended attempt before any other writer can claim a retry.
+            _record_task_failure(
+                conn, row["id"], error,
+                outcome="reclaimed", failure_limit=failure_limit,
+                release_claim=False, end_run=False, expected_run_id=run_id,
+                event_payload_extra={"worker_pid": _opt_int(row["worker_pid"]), "retry_status": retry_status},
+            )
         # Post-commit observer; every non-reclaim branch ``continue``d above.
         if _kanban_observer_consumed("on_kanban_worker_stale_claim"):
             _fire_kanban_lifecycle_hook(
@@ -2661,6 +2674,8 @@ def complete_task(
     auditable event. Approving a card out of ``review`` stays exempt.
     """
     now = int(time.time())
+    from hermes_cli.kanban_execution import reject_reserved
+    reject_reserved(metadata)
     # Cheap pre-check; re-checked inside the txn to close the parent-reopen race.
     if not _parents_satisfied(conn, task_id):
         return False
@@ -3052,6 +3067,8 @@ def edit_task(
     metadata: Optional[dict] = None, board: Optional[str] = None,
 ) -> bool:
     """Edit task fields, optionally backfilling a completed task's result."""
+    from hermes_cli.kanban_execution import reject_reserved, merge_run_metadata
+    reject_reserved(metadata)
     changed_fields = [
         field for field, value in (("title", title), ("body", body), ("priority", priority))
         if value is not None
@@ -3105,6 +3122,7 @@ def edit_task(
                 run_id = int(run["id"])
                 conn.execute("UPDATE task_runs SET summary = ? WHERE id = ?", (handoff_summary, run_id))
                 if metadata is not None:
+                    metadata = merge_run_metadata(conn, run_id, metadata)
                     conn.execute(
                         "UPDATE task_runs SET metadata = ? WHERE id = ?",
                         (json.dumps(metadata, ensure_ascii=False), run_id),
@@ -3278,6 +3296,9 @@ def request_review(
     :class:`ArtifactPreservationError`, rolling the whole transition back: the
     task stays ``running`` and retryable, with no attachments and no event.
     """
+
+    from hermes_cli.kanban_execution import reject_reserved
+    reject_reserved(metadata)
 
     def _ret(ok: bool, reason: Optional[str] = None):
         return (ok, reason) if with_reason else ok
@@ -3893,20 +3914,26 @@ def schedule_task(
 
 # --- Worker context builder (what a spawned worker sees) ---
 
-def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
+def build_worker_context(conn: sqlite3.Connection, task_id: str, *, now: Optional[int] = None,
+                         task: Optional[Task] = None) -> str:
     """Everything a worker should read about its task: header, body,
     attachments, prior attempts, done-parent handoffs, the assignee's recent
     work, comments. Lists are tail-capped and fields char-capped
     (``_CTX_MAX_*``) so the prompt stays bounded on pathological boards."""
-    task = get_task(conn, task_id)
+    if task is None:
+        from hermes_cli.kanban_execution import worker_show
+        sealed = worker_show(conn, task_id)
+        if sealed is not None:
+            return sealed["worker_context"]
+    task = task if task is not None else get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
     from hermes_cli.kanban_db_context import (
         _ctx_attachments, _ctx_comments, _ctx_header, _ctx_parent_results, _ctx_prior_attempts,
         _ctx_role_history,
     )
-    # One clock reading so every relative age in this rendering agrees.
-    now = int(time.time())
+    # Admission previews re-render at the same clock inside the claim transaction.
+    now = int(time.time()) if now is None else now
     lines: list[str] = []
     _ctx_header(lines, task)
     _ctx_attachments(lines, list_attachments(conn, task_id))

@@ -65,6 +65,9 @@ def _ctx_stamp(ts: int, now: int) -> str:
 
 
 def _ctx_metadata_line(metadata: Any) -> Optional[str]:
+    # Admission seals are native control data, never recursive prompt content.
+    if isinstance(metadata, dict):
+        metadata = {k: v for k, v in metadata.items() if not str(k).startswith("_hermes_execution")}
     if not metadata:
         return None
     try:

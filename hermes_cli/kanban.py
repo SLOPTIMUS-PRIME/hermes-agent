@@ -14,6 +14,7 @@ import shlex
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 from hermes_cli import kanban_db as kb
@@ -478,6 +479,23 @@ def _cmd_show(args: argparse.Namespace) -> int:
     graph = None
     want_json = getattr(args, "json", False)
     with kbc.connect_closing() as conn:
+        from hermes_cli.kanban_execution import capture_execution_spec, worker_show
+        sealed = worker_show(conn, args.task_id)
+        if sealed is not None:
+            _print_json(sealed) if want_json else print(sealed['worker_context'])
+            return 0
+        if getattr(args, 'execution_spec', False):
+            from hermes_cli.kanban_execution_cli import read_object
+            prompts = read_object(getattr(args, 'skill_prompts', None))
+            # One SQLite read snapshot for the preview. The claim transaction
+            # independently compares it; this read is not a reservation.
+            conn.execute('BEGIN')
+            try:
+                spec = capture_execution_spec(conn, args.task_id, board=kb.get_current_board(), skill_prompts=prompts)
+            finally:
+                conn.rollback()
+            _print_json(spec)
+            return 0
         task = kb.get_task(conn, args.task_id)
         if not task:
             return _err(f"no such task: {args.task_id}")
@@ -787,9 +805,17 @@ def _cmd_attach(args: argparse.Namespace) -> int:
 
 def _cmd_attachments(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
-        if kb.get_task(conn, args.task_id) is None:
-            return _err(f"no such task: {args.task_id}")
-        atts = kb.list_attachments(conn, args.task_id)
+        from hermes_cli.kanban_execution import worker_show
+
+        sealed = worker_show(conn, args.task_id)
+        if sealed is not None:
+            if not isinstance(sealed.get('attachments'), list):
+                raise ValueError('invalid_execution_attachments')
+            atts = [SimpleNamespace(**a) for a in sealed['attachments']]
+        else:
+            if kb.get_task(conn, args.task_id) is None:
+                return _err(f"no such task: {args.task_id}")
+            atts = kb.list_attachments(conn, args.task_id)
     if _json_out(args, [_obj_dict(a, _ATTACHMENT_FIELDS) for a in atts], ascii=True):
         return 0
     if not atts:
@@ -825,7 +851,7 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
         return None
 
 
-def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
+def _goal_mode_handoff_rejection(task: Optional[kb.Task | SimpleNamespace], evidence: str):
     """Goal judge for every terminal worker handoff (including review).
 
     Returns ``(verdict, reason_or_None)``: ``"done"`` allows; ``"blocked"`` = judge ruled the goal
@@ -883,7 +909,13 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: 
     """Goal-mode judge gate shared by ``complete`` / ``request-review`` (mirrors tools/kanban_tools.py);
     applied to every terminal handoff so request-review can't bypass it. Returns the error line, or
     None to allow."""
-    verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence)
+    from hermes_cli.kanban_execution import worker_show
+
+    # Resolve the seal outside the judge's fail-open handler: an invalid binding
+    # must deny both inference and the lifecycle mutation, even with goal_mode off.
+    sealed = worker_show(conn, tid)
+    task = kb.get_task(conn, tid) if sealed is None else SimpleNamespace(**sealed['task'])
+    verdict, rejection = _goal_mode_handoff_rejection(task, evidence)
     if verdict == "blocked":
         return (f"kanban: goal {handoff} of {tid} rejected: judge ruled "
                 f"the goal unachievable — {rejection}. {blocked_hint}")
@@ -910,6 +942,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     fail_msg: dict[str, str] = {}
     with kbc.connect_closing() as conn:
         def op(tid):
+            expected_run_id = _worker_run_id_for(tid)
             gate_err = _goal_gate_error(
                 conn, tid, (summary or args.result or "").strip(), "completion",
                 "Re-scope with kanban edit, or record the block with kanban block instead of completing.",
@@ -920,7 +953,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             fail_msg[tid] = f"cannot complete {tid} (unknown id or terminal state)"
             try:
                 done = kb.complete_task(conn, tid, result=args.result, summary=summary, metadata=metadata,
-                                        expected_run_id=_worker_run_id_for(tid),
+                                        expected_run_id=expected_run_id,
                                         force=bool(getattr(args, "force", False)))
             except kb.LiveClaimError:
                 fail_msg[tid] = (f"cannot complete {tid}: a live worker is running it. Wait for the "
@@ -1034,6 +1067,7 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
 
 def _cmd_request_review(args: argparse.Namespace) -> int:
     tid = args.task_id
+    expected_run_id = _worker_run_id_for(tid)
     summary = _stripped_or_none(getattr(args, "summary", None))
     metadata, rc = _parse_metadata_flag(getattr(args, "metadata", None))
     if rc:
@@ -1047,7 +1081,7 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
             return _err(gate_err)
         ok, reason = kb.request_review(
             conn, tid, summary=summary, metadata=metadata, reviewer=getattr(args, "reviewer", None),
-            expected_run_id=_worker_run_id_for(tid), force=bool(getattr(args, "force", False)), with_reason=True)
+            expected_run_id=expected_run_id, force=bool(getattr(args, "force", False)), with_reason=True)
         if not ok:
             return _err(f"cannot request review for {tid}: {reason or 'not running/ready?'}")
         persisted_run = kb.latest_run(conn, tid)
