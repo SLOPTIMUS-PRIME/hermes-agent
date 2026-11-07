@@ -1,0 +1,20 @@
+{
+  "official_url": "https://github.com/NousResearch/hermes-agent.git",
+  "official_branch": "main",
+  "fork_url": "https://github.com/SLOPTIMUS-PRIME/hermes-agent.git",
+  "deployment_branch": "nick-patches",
+  "allowed_edit_paths": [
+    "agent/curator.py",
+    "tui_gateway/session_auto_continue.py"
+  ],
+  "patch_intents": {
+    "agent/curator.py": "Preserve conservative curation: zero changes is valid; no archive/merge/reduction quotas and no forced umbrella skills; keep distinct app/project triggers; preserve pinned/external/bundled protections and exact commands/identifiers/supporting files. Accept upstream description-length and API changes, including 60 characters instead of 57. Do not restore consolidation pressure.",
+    "tui_gateway/session_auto_continue.py": "A user message queued while an earlier Stop is winding down must clear only that old cancellation latch, allowing goal continuation and completion admission. A new Stop racing drain must still cancel the queued work and block automatic turns. Preserve all newer ownership, revision and stop-generation checks. If upstream implements this already, keep its implementation rather than redundant code."
+  },
+  "max_repairs": 3,
+  "max_input_bytes": 750000,
+  "max_edit_bytes": 300000,
+  "reuse_validation": false,
+  "command_timeout": 600,
+  "test_timeout": 900
+}

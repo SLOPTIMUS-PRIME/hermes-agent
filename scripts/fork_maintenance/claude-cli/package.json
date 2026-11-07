@@ -1,0 +1,9 @@
+{
+  "name": "fork-maintenance-claude-cli",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned Claude Code CLI used only by the fork-maintenance repair adapter.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.319"
+  }
+}

@@ -1,0 +1,134 @@
+name: Fork maintenance
+
+# Daily maintenance of SLOPTIMUS-PRIME/hermes-agent:nick-patches.  The control code
+# (this workflow and scripts/fork_maintenance) always comes from main; nick-patches is
+# only ever a separate checkout, the merge candidate and the CAS-publication target.
+# Candidate code runs solely in the networkless, credential-free Bubblewrap sandbox of
+# scripts/fork_maintenance/sandbox_tests.py.  Claude Code runs with no tools; the
+# Claude token and the GitHub token are never present in the same child process.
+# Pushing to nick-patches uses the job's GITHUB_TOKEN, which does not start other
+# workflow runs.
+
+on:
+  schedule:
+    # 14:15 UTC = 03:15 New Zealand daylight time.
+    - cron: '15 14 * * *'
+  workflow_dispatch:
+    inputs:
+      repair_probe:
+        description: Exercise the real Claude repair path on a disposable synthetic conflict; nothing is published.
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: fork-maintenance
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
+jobs:
+  maintain:
+    name: Maintain nick-patches
+    if: github.repository == 'SLOPTIMUS-PRIME/hermes-agent' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      WORK: ${{ runner.temp }}/fork-maintenance
+      CLAUDE_CLI: ${{ runner.temp }}/claude-cli
+      TEST_VENV: ${{ runner.temp }}/test-venv
+      TEST_RUNTIME: ${{ runner.temp }}/test-runtime.json
+      REPAIR_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_probe && 'true' || 'false' }}
+    steps:
+      - name: Check out control code (main)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Check out nick-patches seed
+        if: env.REPAIR_PROBE != 'true'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: SLOPTIMUS-PRIME/hermes-agent
+          ref: nick-patches
+          path: seed
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.14'
+
+      - name: Install the pinned Claude Code CLI
+        run: |
+          mkdir -p "$CLAUDE_CLI"
+          cp control/scripts/fork_maintenance/claude-cli/package.json control/scripts/fork_maintenance/claude-cli/package-lock.json "$CLAUDE_CLI/"
+          npm ci --ignore-scripts --no-audit --no-fund --prefix "$CLAUDE_CLI"
+          bin="$CLAUDE_CLI/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+          test -x "$bin"
+          version="$(env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" "$bin" --version)"
+          test "$version" = "2.1.319 (Claude Code)"
+          echo "CLAUDE_BIN=$bin" >> "$GITHUB_ENV"
+
+      - name: Prepare sandbox tooling and locked test runtime
+        env:
+          PYTHON_BIN: ${{ steps.python.outputs.python-path }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends bubblewrap
+          probe() {
+            bwrap --unshare-all --unshare-user --cap-drop ALL --ro-bind /usr /usr --symlink usr/lib /lib \
+              --symlink usr/lib64 /lib64 --proc /proc /usr/bin/true
+          }
+          if ! probe; then
+            # Ubuntu 24.04 hosted runners deny unprivileged user namespaces through AppArmor.
+            # The candidate still runs unprivileged and capability-less inside Bubblewrap.
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+            probe
+          fi
+          "$PYTHON_BIN" -m pip install --disable-pip-version-check --quiet uv==0.12.1
+          export UV_PROJECT_ENVIRONMENT="$TEST_VENV" UV_NO_PROGRESS=1
+          (cd control && "$PYTHON_BIN" -m uv sync --frozen --no-install-project --no-default-groups \
+            --extra all --group test --python "$PYTHON_BIN" --no-python-downloads)
+          "$PYTHON_BIN" -m uv pip install --python "$TEST_VENV/bin/python" --require-hashes \
+            -r control/scripts/fork_maintenance/test-requirements.txt
+          "$PYTHON_BIN" control/scripts/fork_maintenance/prepare_runtime.py --venv "$TEST_VENV" --out "$TEST_RUNTIME"
+
+      - name: Run maintainer self-tests
+        run: python -m unittest discover -s control/scripts/fork_maintenance/tests -v
+
+      - name: Maintain the fork
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GITHUB_TOKEN: ${{ (github.event_name != 'workflow_dispatch' || !inputs.repair_probe) && github.token || '' }}
+        run: |
+          args=(--work-dir "$WORK" --claude-bin "$CLAUDE_BIN")
+          if [ "$REPAIR_PROBE" = true ]; then
+            args+=(--repair-probe)
+          else
+            args+=(--seed-repo seed --runtime "$TEST_RUNTIME")
+          fi
+          python control/scripts/fork_maintenance/run_maintenance.py "${args[@]}"
+
+      - name: Ensure a result exists
+        if: always()
+        run: python control/scripts/fork_maintenance/run_maintenance.py --work-dir "$WORK" --ensure-result
+
+      - name: Upload maintenance result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: fork-maintenance-result
+          path: ${{ runner.temp }}/fork-maintenance/state/latest.json
+          if-no-files-found: error
+          retention-days: 30
