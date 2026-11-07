@@ -1,8 +1,8 @@
 name: Fork maintenance
 
 # Daily maintenance of SLOPTIMUS-PRIME/hermes-agent:nick-patches.  The control code
-# (this workflow and scripts/fork_maintenance) always comes from main; nick-patches is
-# only ever a separate checkout, the merge candidate and the CAS-publication target.
+# (this workflow and scripts/fork_maintenance) comes from the default nick-patches
+# branch. The candidate is isolated in a separate checkout before CAS publication.
 # Candidate code runs solely in the networkless, credential-free Bubblewrap sandbox of
 # scripts/fork_maintenance/sandbox_tests.py.  Claude Code runs with no tools; the
 # Claude token and the GitHub token are never present in the same child process.
@@ -34,7 +34,7 @@ defaults:
 jobs:
   maintain:
     name: Maintain nick-patches
-    if: github.repository == 'SLOPTIMUS-PRIME/hermes-agent' && github.ref == 'refs/heads/main'
+    if: github.repository == 'SLOPTIMUS-PRIME/hermes-agent' && github.ref == 'refs/heads/nick-patches'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
@@ -47,7 +47,7 @@ jobs:
           printf '%s\n' "WORK=$RUNNER_TEMP/fork-maintenance" "CLAUDE_CLI=$RUNNER_TEMP/claude-cli" \
             "TEST_VENV=$RUNNER_TEMP/test-venv" "TEST_RUNTIME=$RUNNER_TEMP/test-runtime.json" >> "$GITHUB_ENV"
 
-      - name: Check out control code (main)
+      - name: Check out control code (nick-patches)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}

@@ -33,7 +33,7 @@ class Workflow(unittest.TestCase):
         self.assertRegex(self.text, r'(?m)^permissions: \{\}$')
         self.assertEqual(re.findall(r'(?m)^\s+contents: (\w+)$', self.text), ['write'])
         self.assertNotRegex(self.text, r'(?m)^\s+(id-token|actions|packages|pull-requests|workflows|secrets):')
-        self.assertIn("github.ref == 'refs/heads/main'", self.text)
+        self.assertIn("github.ref == 'refs/heads/nick-patches'", self.text)
         self.assertIn("github.repository == 'SLOPTIMUS-PRIME/hermes-agent'", self.text)
         self.assertIn('cancel-in-progress: false', self.text)
         self.assertNotIn('pull_request_target', self.text)
