@@ -40,12 +40,13 @@ jobs:
     permissions:
       contents: write
     env:
-      WORK: ${{ runner.temp }}/fork-maintenance
-      CLAUDE_CLI: ${{ runner.temp }}/claude-cli
-      TEST_VENV: ${{ runner.temp }}/test-venv
-      TEST_RUNTIME: ${{ runner.temp }}/test-runtime.json
       REPAIR_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_probe && 'true' || 'false' }}
     steps:
+      - name: Set runner paths
+        run: |
+          printf '%s\n' "WORK=$RUNNER_TEMP/fork-maintenance" "CLAUDE_CLI=$RUNNER_TEMP/claude-cli" \
+            "TEST_VENV=$RUNNER_TEMP/test-venv" "TEST_RUNTIME=$RUNNER_TEMP/test-runtime.json" >> "$GITHUB_ENV"
+
       - name: Check out control code (main)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
