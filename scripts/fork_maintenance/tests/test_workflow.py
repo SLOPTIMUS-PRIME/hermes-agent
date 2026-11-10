@@ -32,7 +32,8 @@ class Workflow(unittest.TestCase):
     def test_least_privilege_and_main_only(self):
         self.assertRegex(self.text, r'(?m)^permissions: \{\}$')
         self.assertEqual(re.findall(r'(?m)^\s+contents: (\w+)$', self.text), ['write'])
-        self.assertNotRegex(self.text, r'(?m)^\s+(id-token|actions|packages|pull-requests|workflows|secrets):')
+        self.assertEqual(re.findall(r'(?m)^\s+actions: (\w+)$', self.text), ['write'])
+        self.assertNotRegex(self.text, r'(?m)^\s+(id-token|packages|pull-requests|workflows|secrets):')
         self.assertIn("github.ref == 'refs/heads/nick-patches'", self.text)
         self.assertIn("github.repository == 'SLOPTIMUS-PRIME/hermes-agent'", self.text)
         self.assertIn('cancel-in-progress: false', self.text)
@@ -68,9 +69,12 @@ class Workflow(unittest.TestCase):
     def test_secrets_are_scoped_to_the_single_maintenance_step(self):
         steps = re.split(r'(?m)^      - name: ', self.text)[1:]
         holders = [s.splitlines()[0] for s in steps if 'secrets.' in s or 'github.token' in s]
-        self.assertEqual(holders, ['Maintain the fork'])
-        self.assertEqual(len(re.findall(r'secrets\.', self.text)), 1)
+        self.assertEqual(holders, ['Maintain the fork', 'Keep upstream workflows disabled'])
+        self.assertEqual(len(re.findall(r'secrets\.', self.text)), 2)
         self.assertIn('secrets.CLAUDE_CODE_OAUTH_TOKEN', self.text)
+        self.assertIn('secrets.FORK_PUSH_TOKEN', self.text)
+        disable = self.text.split('- name: Keep upstream workflows disabled', 1)[1].split('\n      - name:', 1)[0]
+        self.assertNotIn('secrets.', disable)
         self.assertNotIn('ANTHROPIC_API_KEY', self.text)
         self.assertNotIn('--bare', self.text)
 

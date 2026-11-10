@@ -6,8 +6,10 @@ name: Fork maintenance
 # Candidate code runs solely in the networkless, credential-free Bubblewrap sandbox of
 # scripts/fork_maintenance/sandbox_tests.py.  Claude Code runs with no tools; the
 # Claude token and the GitHub token are never present in the same child process.
-# Pushing to nick-patches uses the job's GITHUB_TOKEN, which does not start other
-# workflow runs.
+# Pushing to nick-patches uses the FORK_PUSH_TOKEN secret (fine-grained, this repo
+# only, Contents + Workflows write) because the job's GITHUB_TOKEN may never push
+# changes under .github/workflows/.  Upstream workflow files arrive with each sync,
+# so a final step disables every workflow except this one.
 
 on:
   schedule:
@@ -39,6 +41,7 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: write
+      actions: write
     env:
       REPAIR_PROBE: ${{ github.event_name == 'workflow_dispatch' && inputs.repair_probe && 'true' || 'false' }}
     steps:
@@ -111,7 +114,7 @@ jobs:
       - name: Maintain the fork
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          GITHUB_TOKEN: ${{ (github.event_name != 'workflow_dispatch' || !inputs.repair_probe) && github.token || '' }}
+          GITHUB_TOKEN: ${{ (github.event_name != 'workflow_dispatch' || !inputs.repair_probe) && secrets.FORK_PUSH_TOKEN || '' }}
         run: |
           args=(--work-dir "$WORK" --claude-bin "$CLAUDE_BIN")
           if [ "$REPAIR_PROBE" = true ]; then
@@ -120,6 +123,19 @@ jobs:
             args+=(--seed-repo seed --runtime "$TEST_RUNTIME")
           fi
           python control/scripts/fork_maintenance/run_maintenance.py "${args[@]}"
+
+      - name: Keep upstream workflows disabled
+        if: always() && env.REPAIR_PROBE != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh api --paginate "repos/$GH_REPO/actions/workflows" \
+            --jq '.workflows[] | select(.state == "active" and .path != ".github/workflows/fork-maintenance.yml") | .id' |
+          while read -r id; do
+            echo "Disabling workflow $id"
+            gh api -X PUT "repos/$GH_REPO/actions/workflows/$id/disable"
+          done
 
       - name: Ensure a result exists
         if: always()
