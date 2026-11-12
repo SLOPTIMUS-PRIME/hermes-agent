@@ -68,7 +68,7 @@ class Config(unittest.TestCase):
         self.assertEqual(set(policy['patch_intents']), set(policy['allowed_edit_paths']))
         self.assertEqual(policy['fork_url'], 'https://github.com/SLOPTIMUS-PRIME/hermes-agent.git')
         self.assertEqual(policy['official_url'], 'https://github.com/NousResearch/hermes-agent.git')
-        self.assertEqual(policy['deployment_branch'], 'nick-patches')
+        self.assertEqual(policy['deployment_branch'], 'main')
         self.assertIs(policy['reuse_validation'], False)
         if LOCAL_CONFIG.exists():
             local = json.loads(LOCAL_CONFIG.read_text())

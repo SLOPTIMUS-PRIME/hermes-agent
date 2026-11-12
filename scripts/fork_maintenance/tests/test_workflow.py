@@ -34,7 +34,7 @@ class Workflow(unittest.TestCase):
         self.assertEqual(re.findall(r'(?m)^\s+contents: (\w+)$', self.text), ['write'])
         self.assertEqual(re.findall(r'(?m)^\s+actions: (\w+)$', self.text), ['write'])
         self.assertNotRegex(self.text, r'(?m)^\s+(id-token|packages|pull-requests|workflows|secrets):')
-        self.assertIn("github.ref == 'refs/heads/nick-patches'", self.text)
+        self.assertIn("github.ref == 'refs/heads/main'", self.text)
         self.assertIn("github.repository == 'SLOPTIMUS-PRIME/hermes-agent'", self.text)
         self.assertIn('cancel-in-progress: false', self.text)
         self.assertNotIn('pull_request_target', self.text)
@@ -55,7 +55,7 @@ class Workflow(unittest.TestCase):
             self.assertIn('persist-credentials: false', block)
         self.assertIn('path: control', blocks[0])
         self.assertIn('ref: ${{ github.sha }}', blocks[0])
-        self.assertIn('ref: nick-patches', blocks[1])
+        self.assertIn('ref: main', blocks[1])
         self.assertIn('path: seed', blocks[1])
 
     def test_no_user_controlled_expression_reaches_a_shell(self):

@@ -2,7 +2,7 @@
   "official_url": "https://github.com/NousResearch/hermes-agent.git",
   "official_branch": "main",
   "fork_url": "https://github.com/SLOPTIMUS-PRIME/hermes-agent.git",
-  "deployment_branch": "nick-patches",
+  "deployment_branch": "main",
   "allowed_edit_paths": [
     "agent/curator.py",
     "tui_gateway/session_auto_continue.py"
