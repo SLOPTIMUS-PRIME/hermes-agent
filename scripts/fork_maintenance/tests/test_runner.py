@@ -155,7 +155,7 @@ class Results(unittest.TestCase):
         self.assertEqual(doc, on_disk)
         self.assertEqual((doc['status'], doc['exit_code'], doc['candidate']), ('failed', 7, None))
         self.assertEqual(doc['input']['fork_url'], 'https://github.com/SLOPTIMUS-PRIME/hermes-agent.git')
-        self.assertEqual(doc['input']['deployment_branch'], 'nick-patches')
+        self.assertEqual(doc['input']['deployment_branch'], 'main')
         self.assertNotEqual(doc['publish']['status'], 'published')
         self.assertIsNone(doc['checks']['tests'])
 
