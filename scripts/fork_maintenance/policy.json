@@ -5,11 +5,15 @@
   "deployment_branch": "main",
   "allowed_edit_paths": [
     "agent/curator.py",
-    "tui_gateway/session_auto_continue.py"
+    "tui_gateway/session_auto_continue.py",
+    "hermes_cli/inventory.py",
+    "hermes_cli/model_switch_providers.py"
   ],
   "patch_intents": {
     "agent/curator.py": "Preserve conservative curation: zero changes is valid; no archive/merge/reduction quotas and no forced umbrella skills; keep distinct app/project triggers; preserve pinned/external/bundled protections and exact commands/identifiers/supporting files. Accept upstream description-length and API changes, including 60 characters instead of 57. Do not restore consolidation pressure.",
-    "tui_gateway/session_auto_continue.py": "A user message queued while an earlier Stop is winding down must clear only that old cancellation latch, allowing goal continuation and completion admission. A new Stop racing drain must still cancel the queued work and block automatic turns. Preserve all newer ownership, revision and stop-generation checks. If upstream implements this already, keep its implementation rather than redundant code."
+    "tui_gateway/session_auto_continue.py": "A user message queued while an earlier Stop is winding down must clear only that old cancellation latch, allowing goal continuation and completion admission. A new Stop racing drain must still cancel the queued work and block automatic turns. Preserve all newer ownership, revision and stop-generation checks. If upstream implements this already, keep its implementation rather than redundant code.",
+    "hermes_cli/inventory.py": "build_models_payload must pass its configured provider rows through hermes_cli.model_allowlist.apply_model_allowlist (model_catalog.allowed_models) before unconfigured rows are appended, so every GUI picker shows only allowlisted providers/models. Read the allowlist from the raw config so the payload still does one full config load. Accept all other upstream changes.",
+    "hermes_cli/model_switch_providers.py": "list_authenticated_providers must return its finalized rows through hermes_cli.model_allowlist.apply_model_allowlist, so gateway /model pickers honor model_catalog.allowed_models. Accept all other upstream changes."
   },
   "max_repairs": 3,
   "max_input_bytes": 750000,

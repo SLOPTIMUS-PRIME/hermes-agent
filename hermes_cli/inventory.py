@@ -138,6 +138,8 @@ def build_models_payload(
     # A local proxy serving a model also in an aggregator's catalog would show under both, and picking
     # the aggregator row silently breaks the call — aggregators only list models no specific provider has.
     _strip_aggregator_overlaps(rows)
+    from hermes_cli.model_allowlist import apply_model_allowlist
+    rows = apply_model_allowlist(rows)  # model_catalog.allowed_models
 
     if include_unconfigured:
         rows = list(rows) + _without_slug(_append_unconfigured_rows(rows, ctx), "moa")

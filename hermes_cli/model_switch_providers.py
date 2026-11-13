@@ -1307,7 +1307,8 @@ def list_authenticated_providers(
     if custom_providers and isinstance(custom_providers, list):
         _lap_custom_provider_rows(b, custom_providers)
 
-    return _finalize_picker_rows(b.results, user_providers, current_model)
+    from hermes_cli.model_allowlist import apply_model_allowlist
+    return apply_model_allowlist(_finalize_picker_rows(b.results, user_providers, current_model))
 
 
 def _finalize_picker_rows(results: list, user_providers, current_model: str) -> list:
