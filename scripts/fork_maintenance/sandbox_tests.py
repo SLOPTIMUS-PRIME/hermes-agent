@@ -29,6 +29,7 @@ DEFAULT_TESTS = [
     'tests/tui_gateway/test_queued_prompt_stop_recovery.py',
     'tests/tui_gateway/test_queued_prompt_persistence.py',
     'tests/agent/test_curator.py',
+    'tests/hermes_cli/test_model_allowlist.py',
 ]
 BWRAP_CANDIDATES = ('/usr/bin/bwrap', '/usr/sbin/bwrap', '/usr/local/bin/bwrap')
 HOST_ENV = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C.UTF-8', 'LANG': 'C.UTF-8'}

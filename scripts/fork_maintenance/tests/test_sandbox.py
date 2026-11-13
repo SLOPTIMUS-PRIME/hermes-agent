@@ -58,10 +58,11 @@ class Argv(unittest.TestCase):
         self.assertIn('--disable-userns', self.cmd(disable_userns=True))
 
     def test_required_regression_tests_are_the_upstream_set(self):
-        self.assertEqual(len(s.DEFAULT_TESTS), 4)
+        self.assertEqual(len(s.DEFAULT_TESTS), 5)
         self.assertEqual(set(s.DEFAULT_TESTS), {
             'tests/agent/test_curator_conservative_prompt.py', 'tests/tui_gateway/test_queued_prompt_stop_recovery.py',
-            'tests/tui_gateway/test_queued_prompt_persistence.py', 'tests/agent/test_curator.py'})
+            'tests/tui_gateway/test_queued_prompt_persistence.py', 'tests/agent/test_curator.py',
+            'tests/hermes_cli/test_model_allowlist.py'})
         payload = s.pytest_payload()
         for rel in s.DEFAULT_TESTS:
             self.assertIn(rel, payload)

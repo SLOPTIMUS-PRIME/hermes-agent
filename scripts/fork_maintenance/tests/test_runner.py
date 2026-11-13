@@ -64,7 +64,8 @@ def local_policy(fixture: dict, **over) -> dict:
 class Config(unittest.TestCase):
     def test_production_policy_matches_the_tested_local_contract(self):
         policy = rm.load_policy()
-        self.assertEqual(policy['allowed_edit_paths'], ['agent/curator.py', 'tui_gateway/session_auto_continue.py'])
+        self.assertEqual(policy['allowed_edit_paths'], ['agent/curator.py', 'tui_gateway/session_auto_continue.py',
+                                                        'hermes_cli/inventory.py', 'hermes_cli/model_switch_providers.py'])
         self.assertEqual(set(policy['patch_intents']), set(policy['allowed_edit_paths']))
         self.assertEqual(policy['fork_url'], 'https://github.com/SLOPTIMUS-PRIME/hermes-agent.git')
         self.assertEqual(policy['official_url'], 'https://github.com/NousResearch/hermes-agent.git')
@@ -85,7 +86,8 @@ class Config(unittest.TestCase):
             path.write_text(json.dumps(cfg))
             loaded, err = maintainer.load_config(str(path))
         self.assertIsNone(err)
-        self.assertEqual(loaded['allowed'], {'agent/curator.py', 'tui_gateway/session_auto_continue.py'})
+        self.assertEqual(loaded['allowed'], {'agent/curator.py', 'tui_gateway/session_auto_continue.py',
+                                             'hermes_cli/inventory.py', 'hermes_cli/model_switch_providers.py'})
         self.assertIn('.github', loaded['forbidden'])
         self.assertIn('{candidate}', cfg['test_command'])
         self.assertEqual(cfg['test_command'][1], str(ROOT / 'sandbox_tests.py'))
