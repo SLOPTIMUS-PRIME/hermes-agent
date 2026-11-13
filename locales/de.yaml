@@ -167,7 +167,10 @@ gateway:
     full_logs_hint: "Für vollständige Log-Uploads verwenden Sie `hermes debug share` aus der CLI."
     share_hint: "Teilen Sie diese Links mit dem Hermes-Team, um Unterstützung zu erhalten."
     report_label: "Bericht"
-    local_refused: "`/debug local` behält den Bericht auf dem Rechner, auf dem Hermes läuft, und ist daher im Chat nicht verfügbar. Senden Sie `/debug`, um den Kurzbericht hochzuladen."
+    local_refused: "`/debug local` behält den Bericht auf dem Rechner, auf dem Hermes läuft, und ist daher im Chat nicht verfügbar. Senden Sie `/debug upload`, um den Kurzbericht hochzuladen."
+    upload_hint: "Es wurde nichts hochgeladen. Senden Sie `/debug upload`, um den Kurzbericht hochzuladen."
+    upload_hint_local: "Es wurde nichts hochgeladen. Senden Sie `/debug upload`, um den Kurzbericht hochzuladen, oder `/debug local`, um ihn hier anzuzeigen."
+    nous_refused: "Es wurde nichts hochgeladen. Private Nous-Uploads sind hier nicht verfügbar: Führen Sie `hermes debug share --nous` in einem Terminal aus oder nutzen Sie Send diagnostics in der Desktop-App. `/debug upload` lädt den Kurzbericht stattdessen in einen öffentlichen Paste hoch."
   deny:
     stale: "❌ Befehl abgelehnt (Genehmigung war veraltet)."
     no_pending: "Kein ausstehender Befehl zum Ablehnen."
@@ -980,6 +983,7 @@ platform:
     denied: "❌ Abgelehnt."
     approval_expired: "⌛ Genehmigung abgelaufen — Befehl wurde nicht ausgeführt (Zeitüberschreitung oder bereits anderswo entschieden)."
   shared:
+    response_as_file: "📎 Lange Antwort: Der vollständige Text ist angehängt."
     truncated_suffix: "\n...(gekürzt)"
     unknown: "unbekannt"
     approval_expired: "⌛ Genehmigung abgelaufen — der Befehl wurde nicht ausgeführt (Zeitüberschreitung oder bereits anderswo entschieden)."
@@ -1170,8 +1174,6 @@ platform:
         unknown: "Unbekannter Skill: `{name}`. Tippen Sie los, um Vorschläge zur Vervollständigung zu erhalten."
       auto_args_description: "Argumente: {args_hint}"
       auto_description_fallback: "/{name} ausführen"
-    limits:
-      response_truncated: "⚠️ **Antwort gekürzt** — diese Antwort hat das Zustellungslimit ({max_messages} Nachrichten) überschritten. {dropped_chars} Zeichen wurden nicht zugestellt; die vollständige Antwort steht in den Sitzungs-Logs."
     forum:
       default_title: "Neuer Beitrag"
     voice:
@@ -1707,7 +1709,7 @@ slash:
   version:
     description: "Hermes-Agent-Version anzeigen"
   debug:
-    description: "Debug-Bericht hochladen (Systeminfo + Logs) und teilbare Links erhalten"
+    description: "Debug-Bericht (Systeminfo + Logs): zeigt zuerst den Datenschutzhinweis; /debug upload teilt Links"
   quit:
     description: "CLI beenden (--delete entfernt zusätzlich den Sitzungsverlauf)"
 cli:

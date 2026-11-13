@@ -167,7 +167,10 @@ gateway:
     full_logs_hint: "如需上傳完整紀錄，請在 CLI 中使用 `hermes debug share`。"
     share_hint: "請將這些連結分享給 Hermes 團隊以取得支援。"
     report_label: "報告"
-    local_refused: "`/debug local` 會把報告留在執行 Hermes 的機器上，因此無法在聊天中使用。傳送 `/debug` 可上傳摘要報告。"
+    local_refused: "`/debug local` 會把報告留在執行 Hermes 的機器上，因此無法在聊天中使用。傳送 `/debug upload` 可上傳摘要報告。"
+    upload_hint: "未上傳任何內容。傳送 `/debug upload` 可上傳摘要報告。"
+    upload_hint_local: "未上傳任何內容。傳送 `/debug upload` 可上傳摘要報告，或傳送 `/debug local` 在此檢視。"
+    nous_refused: "未上傳任何內容。此處無法使用 Nous 私人上傳：請在終端機執行 `hermes debug share --nous`，或使用桌面應用程式中的 Send diagnostics。`/debug upload` 則會將摘要上傳到公開的貼上服務。"
   deny:
     stale: "❌ 指令已拒絕（批准已過期）。"
     no_pending: "沒有待拒絕的指令。"
@@ -980,6 +983,7 @@ platform:
     denied: "❌ 已拒絕。"
     approval_expired: "⌛ 批准已逾期 — 指令未執行（已逾時或已在其他地方處理）。"
   shared:
+    response_as_file: "📎 回覆較長：完整內容已附為檔案。"
     truncated_suffix: "\n...（已截斷）"
     unknown: "未知"
     approval_expired: "⌛ 批准已逾期 — 指令未執行（已逾時或已在其他地方處理）。"
@@ -1170,8 +1174,6 @@ platform:
         unknown: "未知技能：`{name}`。開始輸入即可取得自動完成建議。"
       auto_args_description: "引數：{args_hint}"
       auto_description_fallback: "執行 /{name}"
-    limits:
-      response_truncated: "⚠️ **回應已截斷** — 此回覆超過傳送上限（{max_messages} 則訊息）。有 {dropped_chars} 個字元未送達；完整回應請見工作階段記錄。"
     forum:
       default_title: "新貼文"
     voice:
@@ -1707,7 +1709,7 @@ slash:
   version:
     description: "顯示 Hermes Agent 版本"
   debug:
-    description: "上傳除錯報告（系統資訊 + 日誌）並取得可分享的連結"
+    description: "除錯報告（系統資訊 + 日誌）：先顯示隱私聲明；/debug upload 分享連結"
   quit:
     description: "離開 CLI（加上 --delete 同時移除工作階段歷史）"
 cli:

@@ -233,15 +233,15 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             pairable_dm = source.chat_type == "dm" and not getattr(source, "is_bot", False)
             behavior = self._get_unauthorized_dm_behavior(source.platform, profile=source.profile) if pairable_dm else None
             if behavior == "pair":
-                logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
+                logger.warning("Unauthorized user: %s on %s", source.user_id, source.platform.value)
                 await self._hm_offer_pairing_code(source)
             elif behavior == "decline":
-                logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
+                logger.warning("Unauthorized user: %s on %s", source.user_id, source.platform.value)
                 await self._hm_send_unauthorized_decline(source)
             elif pairable_dm:
                 await self._hm_report_ignored_dm(source)
             else:
-                logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
+                logger.warning("Unauthorized user: %s on %s", source.user_id, source.platform.value)
             return None
         # The busy path charged this event on arrival; a drained follow-up must not pay twice.
         if not getattr(event, "_bot_loop_admitted", False) and not (
@@ -449,15 +449,18 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
     def _refused_clarify(self, event: MessageEvent, clarify_id: str) -> Optional[str]:
         """The localized refusal when *event*'s sender may not answer clarify *clarify_id* (not its
         requester, an approver, or this bot's admin), else None."""
+        from gateway.relay.admitted_authors import answer_admitted
         from gateway.approval_actor import clarify_refusal, refusal_text
-        requester = clarify_refusal(clarify_id, event.sender_id() or "", admin_ids=self._prompt_admin_ids(event))
+        requester = clarify_refusal(clarify_id, event.sender_id() or "", admin_ids=self._prompt_admin_ids(event),
+                                    admitted=answer_admitted(event))
         return refusal_text(requester) if requester else None
 
     def _refused_slash_confirm(self, event: MessageEvent, session_key: str, confirm_id: str) -> Optional[str]:
         """The localized refusal when *event*'s sender may not answer slash confirm *confirm_id*, else None."""
+        from gateway.relay.admitted_authors import answer_admitted
         from gateway.approval_actor import refusal_text, slash_confirm_refusal
         requester = slash_confirm_refusal(session_key, confirm_id, event.sender_id() or "",
-                                          admin_ids=self._prompt_admin_ids(event))
+                                          admin_ids=self._prompt_admin_ids(event), admitted=answer_admitted(event))
         return refusal_text(requester) if requester else None
 
     def _prompt_admin_ids(self, event: MessageEvent):
@@ -1356,6 +1359,10 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             return True, None  # a /stop or /new came after its command, as it clears the slot
         # A failed admit stays the authority's answer (refusal notice or turn error), never a
         # pending legacy turn: that would run unadmitted, outside the FIFO's order.
+        if busy and getattr(event, "_gateway_pending_stt_clips", None):
+            # The FIFO turn restores a fresh event: it reuses the transcript and echo paid above.
+            from gateway.run_inbound_transcription import hand_prepared_voice_to_turn
+            await asyncio.to_thread(hand_prepared_voice_to_turn, event)
         note_busy_admitting(event)
         notice = pending_setup_busy_notice(self, _quick_key, source) if busy else None
         if notice is not None:  # sent now: the admission below waits until this follow-up has run
@@ -1588,30 +1595,23 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
 
     async def _echo_stt_transcripts(
         self, adapter, source: SessionSource, transcripts: list[str], *, metadata=None, log_context: str = "Transcript"
-    ) -> None:
-        """Send each transcript back as ``🎙️ "…"`` (best-effort; failures are logged, never raised)."""
+    ) -> int:
+        """Send each transcript back as ``🎙️ "…"`` (best-effort; failures are logged, never raised)
+        → how many sends the platform accepted."""
         from gateway.bot_peer_notices import automatic_notices_allowed
+        accepted = 0
         for tx in transcripts if automatic_notices_allowed(source) else ():
             try:
-                await adapter.send(source.chat_id, t("gateway.voice.transcript_echo_short", text=tx), metadata=metadata)
+                result = await adapter.send(
+                    source.chat_id, t("gateway.voice.transcript_echo_short", text=tx), metadata=metadata)
             except Exception as echo_exc:
                 logger.debug("%s echo failed (non-fatal): %s", log_context, echo_exc)
-
-    async def _enrich_inbound_voice(
-        self, event: MessageEvent, source: SessionSource, message_text: str, audio_paths: list[str]
-    ) -> str:
-        message_text, _successful_transcripts = await self._enrich_message_with_transcription(
-            message_text, audio_paths,
-        )
-        # Echo each successful transcript back immediately when configured so users can verify STT
-        # quality in real time. On transcription failure do NOT send a hardcoded notice: that
-        # bypassed the LLM and produced two replies; enrichment leaves one neutral marker instead.
-        if _successful_transcripts and self._should_echo_stt_transcripts():
-            _echo_adapter = self._delivery_adapter_for(source)
-            if _echo_adapter:
-                _echo_meta = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
-                await self._echo_stt_transcripts(_echo_adapter, source, _successful_transcripts, metadata=_echo_meta)
-        return message_text
+                continue
+            if getattr(result, "success", False):
+                accepted += 1
+            else:
+                logger.debug("%s echo refused: %s", log_context, getattr(result, "error", None))
+        return accepted
 
     @staticmethod
     def _inbound_attachment_display_name(path: str, original_name: str = "") -> tuple[str, str]:
