@@ -36,8 +36,11 @@ async def active_list(connection, ref, params):
     for entry in await live_entries(connection.authority, connection.actor):
         row = entry.row
         # The same population as the live ``session.list`` feed, hidden chats included: a hidden
-        # chat open in a pane still needs its turn's liveness.
-        if row.get('source') in INTERNAL_LISTING_SOURCES or entry.closed:
+        # chat open in a pane still needs its turn's liveness. So does a one-shot, kanban or tool
+        # run a viewer has open (a Workboard-started chat continued in Desktop): left out, a tool
+        # quiet for 45 s read as a reaped turn and Desktop painted "The reply didn't arrive".
+        internal = row.get('source') in INTERNAL_LISTING_SOURCES and not entry.live.subscribers
+        if internal or entry.closed:
             continue
         sid, started = entry.session_id, float(row.get('started_at') or 0)
         rows.append({'current': sid == current, 'id': sid, 'session_key': sid,

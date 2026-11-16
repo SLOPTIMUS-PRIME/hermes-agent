@@ -75,3 +75,19 @@ async def test_a_turn_blocked_on_a_prompt_reads_waiting(owner, monkeypatch):
     controls = owner.authority.sessions['chat'].controls
     monkeypatch.setattr(controls, 'snapshot', lambda session_id, generation: ({'kind': 'approval'},))
     assert (await owner.active())['chat']['status'] == 'waiting'
+
+
+@pytest.mark.asyncio
+async def test_a_one_shot_run_a_viewer_has_open_is_listed(owner):
+    # A Workboard-started chat continued in Desktop keeps source ``oneshot``. Unviewed it stays out
+    # of the feed; with a viewer attached its running turn must not read as reaped.
+    from gateway.session import SessionSource
+    from gateway.session_authority import LiveSession
+    from gateway.config import Platform
+
+    owner.authority.db.create_session('run', source='oneshot')
+    live = LiveSession(SessionSource(platform=Platform.TELEGRAM, chat_id='run'), 'run')
+    owner.authority.sessions['run'] = live
+    assert 'run' not in await owner.active()
+    live.subscribers['viewer'] = object()
+    assert (await owner.active())['run']['source'] == 'oneshot'
