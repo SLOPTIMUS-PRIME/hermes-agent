@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { setApiRequestConnection, setApiRequestProfile } from '@/api/client'
+import { setApiRequestConnection, setApiRequestProfile, setSessionOwnerResolver } from '@/api/client'
 import { $notifications, clearNotifications } from '@/store/notifications'
 import { $connection } from '@/store/session'
 
-import { captureGatewayFileDownload } from './media'
+import { captureGatewayFileDownload, downloadGatewayMediaFile } from './media'
 
 beforeEach(() => {
   clearNotifications()
@@ -15,6 +15,7 @@ beforeEach(() => {
 afterEach(() => {
   setApiRequestConnection(null)
   setApiRequestProfile(null)
+  setSessionOwnerResolver(null)
   $connection.set(null)
   clearNotifications()
   vi.unstubAllGlobals()
@@ -84,6 +85,30 @@ describe('captured gateway file download', () => {
       profile: 'personal',
       path: '/persisted/file.md',
       suggestedName: 'file.md'
+    })
+  })
+
+  it("sends a chat's file with the profile that owns the chat, not the window's", async () => {
+    const saveGatewayFile = vi.fn().mockResolvedValue({ saved: true })
+    vi.stubGlobal('hermesDesktop', { saveGatewayFile })
+    setSessionOwnerResolver(id => (id === 'chat-1' ? 'think-it' : undefined))
+
+    await downloadGatewayMediaFile('/reports/a.pdf', { sessionId: 'chat-1' })
+    await downloadGatewayMediaFile('/reports/a.pdf', { sessionId: 'unknown-chat' })
+
+    expect(saveGatewayFile).toHaveBeenNthCalledWith(1, {
+      connectionId: 'focused-host',
+      path: '/reports/a.pdf',
+      profile: 'think-it',
+      sessionId: 'chat-1',
+      suggestedName: 'a.pdf'
+    })
+    expect(saveGatewayFile).toHaveBeenNthCalledWith(2, {
+      connectionId: 'focused-host',
+      path: '/reports/a.pdf',
+      profile: 'focused',
+      sessionId: 'unknown-chat',
+      suggestedName: 'a.pdf'
     })
   })
 })

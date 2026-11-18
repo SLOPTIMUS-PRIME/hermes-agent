@@ -452,7 +452,17 @@ export async function downloadGatewayMediaFile(
   }
 
   const conn = $connection.get()
-  const owner = origin.owner ?? { connectionId: conn?.connectionId, profile: origin.profile ?? conn?.profile }
+
+  // The file route looks `session_id` up in the profile the request names. A chat from another
+  // profile (opened from the sidebar in this window) must travel with ITS profile, or the lookup
+  // 404s. An owner nothing can name yet keeps the window's profile, as before.
+  const session =
+    origin.sessionId && !origin.owner && !origin.profile ? sessionFileOwnerScope(origin.sessionId) : null
+
+  const owner = origin.owner ?? {
+    connectionId: session?.connectionId ?? conn?.connectionId,
+    profile: session?.profile ?? origin.profile ?? conn?.profile
+  }
 
   return window.hermesDesktop.saveGatewayFile({
     ...(owner.connectionId ? { connectionId: owner.connectionId } : {}),
