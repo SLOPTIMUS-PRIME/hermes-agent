@@ -62,7 +62,7 @@ test.each(controls)('$method attaches to the current owner before fencing a busy
     expect(client.sessionWire).toBe('canonical')
     await expect(correct('alpha')).resolves.toEqual({ status, text })
     expect(sent().map(frame => frame.method)).toEqual(['session.resume', method])
-    expect(sent()[0].params).toEqual({ session_id: 'same', profile: 'alpha', defer_history: true, omit_messages: true })
+    expect(sent()[0].params).toEqual({ session_id: 'same', source: 'desktop', profile: 'alpha', defer_history: true, omit_messages: true })
     expect(sent()[1].params).toEqual({ session_id: 'same', profile: 'alpha', text, execution_generation: 7 })
 
     frames.length = 0
@@ -126,7 +126,7 @@ test.each(controls.flatMap(control => [
     if (wire === 'canonical') {
       await expect(client.request(method, params)).rejects.toThrow('permission_denied')
       expect(frames.map(frame => frame.method)).toEqual(['session.resume'])
-      expect(frames[0].params).toEqual({ session_id: 'same', profile: 'alpha', defer_history: true, omit_messages: true })
+      expect(frames[0].params).toEqual({ session_id: 'same', source: 'desktop', profile: 'alpha', defer_history: true, omit_messages: true })
     } else {
       await expect(client.request(method, params)).resolves.toEqual({ status, text: params.text })
       expect(frames.map(frame => frame.method)).toEqual([method])

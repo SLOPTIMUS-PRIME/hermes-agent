@@ -83,7 +83,7 @@ test('a canonical clarify prompt drives the question card and its lock answers o
     sent.length = 0
     await client.request('clarify.lock', { request_id: 'c1', question_id: 'c1', answer: null })
     expect(sent.map(frame => [frame.method, frame.params])).toEqual([
-      ['session.resume', { session_id: 's', profile: 'default', defer_history: true, omit_messages: true }],
+      ['session.resume', { session_id: 's', source: 'desktop', profile: 'default', defer_history: true, omit_messages: true }],
       ['clarify.respond', { session_id: 's', profile: 'default', execution_generation: 7, prompt_id: 'c1', answer: '' }]
     ])
   } finally {

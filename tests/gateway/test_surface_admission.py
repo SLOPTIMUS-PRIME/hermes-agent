@@ -72,6 +72,51 @@ async def test_surface_fields_are_admitted_and_scoped_to_their_own_turn(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_desktop_submit_into_a_terminal_created_chat_tells_the_model_where_it_renders(tmp_path, monkeypatch):
+    """A one-shot / CLI chat continued in the Desktop app keeps its terminal prompt ("MEDIA: tags are
+    not intercepted"), so while the app has it open each turn carries a note that files attach with
+    MEDIA:. A chat created in the app, and a terminal chat the app has closed, get none."""
+    from gateway import session_surface
+    from gateway.session_controls import AuthorityConnection
+    from gateway.session_surface import DESKTOP_VIEWER_NOTE, surface_turn_note
+
+    seen = []
+    async def answer(event):
+        seen.append(surface_turn_note(SimpleNamespace(valid_tool_names=set())))
+        return 'ok'
+    authority = await _authority(tmp_path, monkeypatch, answer)
+    platform = {'value': 'cli'}
+    monkeypatch.setattr(session_surface, '_session_platform', lambda authority, live: platform['value'])
+    desktop = AuthorityConnection(authority, object(), {'user_id': 'owner'})
+    terminal = AuthorityConnection(authority, object(), {'user_id': 'owner'})
+
+    async def submit(connection, request_id):
+        reply = await connection.dispatch({'id': request_id, 'method': 'prompt.submit', 'params': {
+            'session_id': 's', 'submission_id': request_id, 'text': 'attach the pdf'}})
+        assert reply['result']['status'] == 'queued', reply
+        await authority.sessions['s'].task
+    try:
+        opened = await desktop.dispatch({'id': 1, 'method': 'session.resume',
+                                         'params': {'session_id': 's', 'source': 'desktop'}})
+        assert 'result' in opened, opened
+        await terminal.dispatch({'id': 2, 'method': 'session.resume', 'params': {'session_id': 's'}})
+        await submit(desktop, 'from-app')
+        await submit(terminal, 'app-is-watching')
+        platform['value'] = 'desktop'
+        await submit(desktop, 'app-chat')
+        platform['value'] = 'cli'
+        await desktop.close()
+        await submit(terminal, 'terminal-only')
+    finally:
+        await desktop.close()
+        await terminal.close()
+
+    rows = authority.persistence.admissions.list(session_id='s', pending_only=False)
+    assert all('surface_v1' not in row.payload for row in rows), 'decided when the turn runs, never committed'
+    assert seen == [DESKTOP_VIEWER_NOTE, DESKTOP_VIEWER_NOTE, '', '']
+
+
+@pytest.mark.asyncio
 async def test_voice_turn_is_admitted_and_scoped_to_its_own_turn(tmp_path, monkeypatch):
     """A spoken voice-mode turn (TUI/Desktop ``voice_turn``) rides canonical admission to the turn
     that runs on ``auxiliary.voice_chat``; the next typed turn stays on the main model."""

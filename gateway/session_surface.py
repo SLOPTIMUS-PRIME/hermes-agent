@@ -10,7 +10,15 @@ from contextvars import ContextVar
 
 from persistence.core.errors import AuthorityRefusal
 
-SURFACES = frozenset({'hud', 'voice-live'})
+SURFACES = frozenset({'hud', 'voice-live', 'desktop'})
+# Session surfaces whose frozen prompt says "plain terminal, MEDIA: tags are not intercepted".
+_TERMINAL_PLATFORMS = frozenset({'cli', 'tui'})
+DESKTOP_VIEWER_NOTE = (
+    "[System: The user is reading and answering this conversation in the Hermes desktop app, not a "
+    "terminal, so the terminal guidance in the system prompt does not apply to this reply. Markdown "
+    "renders. To give the user a file, write MEDIA:/absolute/path/to/file on its own line: it shows as "
+    "a card with Download and preview buttons. Do not give a bare path or say files cannot be attached.]"
+)
 _VOICE_CONTEXT_LIMIT = 6000
 _SUBMIT_FIELDS = ('surface', 'voice_context', 'interrupted', 'voice_turn')
 _surface_turn = ContextVar('surface_turn', default=None)
@@ -19,6 +27,46 @@ _surface_turn = ContextVar('surface_turn', default=None)
 def submit_surface_fields(params):
     """The raw per-turn surface fields of a ``prompt.submit`` request, forwarded to admission."""
     return {key: params[key] for key in _SUBMIT_FIELDS if key in params}
+
+
+def mark_desktop_viewer(authority, actor, source):
+    """Remember that *actor*'s connection is the Desktop app: it names itself when it opens a chat
+    (``session.resume source``). Read by ``turn_surface``; forgotten when the connection closes."""
+    if source in ('desktop', 'gui'):
+        authority.__dict__.setdefault('desktop_viewers', set()).add(actor.transport_id)
+
+
+def forget_desktop_viewer(authority, actor):
+    getattr(authority, 'desktop_viewers', set()).discard(actor.transport_id)
+
+
+def _session_platform(authority, live):
+    """The frozen creation platform of a local session (``cli``, ``desktop``, ...), or None."""
+    from gateway.session_policy import policy_for_source
+    try:
+        policy = policy_for_source(authority.runner, getattr(live, 'source', None))
+    except AuthorityRefusal:  # a route whose frozen policy is not restored: the turn refuses it
+        return None
+    return getattr(policy, 'platform', None)
+
+
+def turn_surface(authority, ref, payload):
+    """The surface facts an admitted turn runs with: its committed ``surface_v1``, plus ``desktop``
+    when it names no surface and the Desktop app has this terminal-created chat open (a one-shot or
+    CLI session continued in the app). Such a chat keeps its creation platform, so its prompt tells
+    the model MEDIA: tags print as literal text, while the app renders them as file cards. Decided
+    when the turn runs and never committed: the admission row stays what the client sent."""
+    committed = payload.get('surface_v1')
+    if committed and committed.get('surface'):
+        return committed
+    live = authority.sessions.get(ref.session_id)
+    viewers = getattr(authority, 'desktop_viewers', ())
+    if live is None or not any(getattr(actor, 'transport_id', None) in viewers
+                               for actor in live.subscribers.values()):
+        return committed
+    if _session_platform(authority, live) not in _TERMINAL_PLATFORMS:
+        return committed
+    return {**(committed or {}), 'surface': 'desktop'}
 
 
 def admit_surface(params):
@@ -64,7 +112,11 @@ def _voice_live_note(committed, valid_tool_names):
     return voice_live_turn_note(committed.get('voice_context') or '')
 
 
-_SURFACE_NOTES = {'hud': _hud_note, 'voice-live': _voice_live_note}
+def _desktop_note(committed, valid_tool_names):
+    return DESKTOP_VIEWER_NOTE
+
+
+_SURFACE_NOTES = {'hud': _hud_note, 'voice-live': _voice_live_note, 'desktop': _desktop_note}
 
 
 def surface_note(committed, valid_tool_names=None):

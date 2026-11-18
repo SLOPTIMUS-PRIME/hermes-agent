@@ -532,8 +532,10 @@ export class HermesGateway extends JsonRpcGatewayClient {
   private async attachForRequest(method: string, params: Record<string, unknown>, deadline: number, signal?: AbortSignal): Promise<void> {
     const sid = typeof params.session_id === 'string' ? params.session_id : null
 
+    // `source` names this client to the owner, as session.activate does: after a reconnect this
+    // resume is the only open the new socket sends before a submit.
     const resume = (sessionId: string) => this.request('session.resume', {
-      session_id: sessionId, defer_history: true, omit_messages: true,
+      session_id: sessionId, source: 'desktop', defer_history: true, omit_messages: true,
       ...(params.profile ? { profile: params.profile } : {})
     }, remainingRequestBudget(deadline, signal), signal)
 
