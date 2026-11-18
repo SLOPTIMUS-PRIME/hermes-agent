@@ -644,6 +644,8 @@ class AuthorityConnection:
         reconnect = ref.session_id in self.reconnects
         self.reconnects.discard(ref.session_id)
         requested = ref.session_id
+        from gateway.session_surface import mark_desktop_viewer
+        mark_desktop_viewer(self.authority, self.actor, params.get('source'))
         if 'latest' in params:
             # Bare `-c` / `--resume latest`: the most recent session of that surface family the
             # actor may read (workspace first), resolved by the owner like a title.
@@ -992,6 +994,8 @@ class AuthorityConnection:
         self._siblings.clear()
         from gateway.session_llm_oneshot import forget
         forget(self)  # nobody is left to read its one-shot replies
+        from gateway.session_surface import forget_desktop_viewer
+        forget_desktop_viewer(self.authority, self.actor)
         # Deletion may already have evicted a subscribed session; its membership died
         # with it, and one retired ID must not leave the others (or the transport) attached.
         # A sibling's teardown runs under the primary socket's scope: detach as this owner, as dispatch does.

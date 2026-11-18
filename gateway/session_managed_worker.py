@@ -70,13 +70,15 @@ def _bootstrap(authority, ref, row, policy, scope, text=None):
             if path[0] is None:
                 terminal[path[1]] = value
     live = authority.sessions[ref.session_id]
+    from gateway.session_surface import turn_surface
+    surface = turn_surface(authority, ref, row['payload'])
     # This turn's facts ride the per-turn hydrated request (the bootstrap field set is closed):
     # the admission's one-shot flags, the route's YOLO as of now (never the frozen launch flag) and
     # the committed surface (HUD / live voice / voice turn) when admission recorded one.
     request = dict(json.loads(policy.request_json), turn_v1={
         'finite': row['payload'].get('finite', False), 'unattended': row['payload'].get('unattended') is True,
         'yolo': _session_yolo(authority, live.route, policy),
-        **({'surface_v1': row['payload']['surface_v1']} if row['payload'].get('surface_v1') else {}),
+        **({'surface_v1': surface} if surface else {}),
         **({'display_v1': row['payload']['display_v1']} if row['payload'].get('display_v1') else {})})
     from gateway.session_worker_construct import construct_inputs
     request['construct_v1'] = construct_inputs(authority, policy, live.source.chat_id, live.source)
