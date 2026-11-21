@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set
 
 from hermes_constants import get_hermes_home
-from agent.skill_utils import get_disabled_skill_names
+from agent.skill_utils import get_disabled_skill_names, get_skill_desc_limit
 from tools import skill_usage
 from utils import atomic_json_write
 
@@ -292,7 +292,7 @@ CURATOR_REVIEW_PROMPT = (
     "Preserve exact identifiers, commands, owner decisions and supporting files. "
     "Move lengthy detail into references only when this improves actual use; "
     "do not rewrite correct content for style or erase useful provenance. "
-    "Keep descriptions discoverable in their first 60 characters.\n\n"
+    "Keep descriptions discoverable in their first {desc_limit} characters.\n\n"
     "Hard rules — do not violate:\n"
     "1. DO NOT touch bundled, hub-installed, or external-dir skills "
     "(`skills.external_dirs`). The candidate list below is already filtered "
@@ -869,7 +869,7 @@ def _consolidation_pass(prefix: str, auto_summary: str, dry_run: bool, before_na
             # prune_builtins: archival is the deterministic pass's job, and
             # the bundled policy is archive-only. Hard rule #1 therefore
             # stands unqualified.
-            prompt = f"{CURATOR_REVIEW_PROMPT}\n\n{candidate_list}"
+            prompt = f"{CURATOR_REVIEW_PROMPT.replace('{desc_limit}', str(get_skill_desc_limit()))}\n\n{candidate_list}"
             if dry_run:
                 prompt = f"{CURATOR_DRY_RUN_BANNER}\n\n{prompt}"
             llm_meta = _run_llm_review(prompt)
